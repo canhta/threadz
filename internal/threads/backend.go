@@ -42,8 +42,8 @@ type Backend interface {
 	// ReadReplies returns the replies to one own post, or the mentions of the
 	// agent when the id is empty.
 	ReadReplies(context.Context, string) (Page, error)
-	// ReadOwnMetrics returns the account insights and the follower count.
-	ReadOwnMetrics(context.Context) (Metrics, error)
+	// ReadOwnMetrics returns the account's follower count.
+	ReadOwnMetrics(context.Context) (OwnFollowers, error)
 	// ReadAccountInsights returns the account's daily views and window totals
 	// over since..until.
 	ReadAccountInsights(ctx context.Context, since, until time.Time) (AccountInsights, error)
@@ -173,26 +173,26 @@ const (
 	FollowersFromAPI     = "followers_api_fallback"
 )
 
-// ReadOwnMetrics takes the account insights from the API and the follower count
-// from the own profile page, which is the source of truth: the API figure lags
-// or is wrong. The API count stays only when the page gave none.
-func (l *Live) ReadOwnMetrics(ctx context.Context) (Metrics, error) {
-	m, err := l.API.ReadOwnMetrics(ctx)
+// ReadOwnMetrics takes the follower count from the own profile page, which is
+// the source of truth: the API figure lags or is wrong. The API count stays
+// only when the page gave none.
+func (l *Live) ReadOwnMetrics(ctx context.Context) (OwnFollowers, error) {
+	n, err := l.API.ReadFollowers(ctx)
 	if err != nil {
-		return m, err
+		return OwnFollowers{}, err
 	}
-	m.FollowersSource = FollowersFromAPI
+	out := OwnFollowers{Followers: n, Source: FollowersFromAPI}
 	if l.username == "" {
-		return m, nil
+		return out, nil
 	}
 	b, err := l.session(ctx)
 	if err != nil {
-		return m, nil
+		return out, nil
 	}
 	if n, err := b.ReadFollowers(ctx, l.username); err == nil && n != nil {
-		m.Followers, m.FollowersSource = n, FollowersFromBrowser
+		out = OwnFollowers{Followers: n, Source: FollowersFromBrowser}
 	}
-	return m, nil
+	return out, nil
 }
 
 // Close closes the browser only if the wake opened one.

@@ -74,9 +74,15 @@ type Metrics struct {
 	Quotes    *int64 `json:"quotes,omitempty"`
 	Shares    *int64 `json:"shares,omitempty"`
 	Followers *int64 `json:"followers_count,omitempty"`
-	// FollowersSource is the reason code of where Followers came from: the
-	// own profile page or, when that gave no count, the insights API.
-	FollowersSource string `json:"-"`
+}
+
+// OwnFollowers is the account's follower count. Followers is nil, and encodes
+// as null, when no source gave one: absent is never zero.
+type OwnFollowers struct {
+	Followers *int64 `json:"followers_count"`
+	// Source is the reason code of where Followers came from: the own profile
+	// page or, when that gave no count, the insights API.
+	Source string `json:"-"`
 }
 
 // Profile is a public profile read by username. Followers is nil when the API

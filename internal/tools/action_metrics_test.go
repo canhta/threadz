@@ -69,21 +69,29 @@ func TestReadOwnMetricsIsAHarnessReadTheModelCannotCall(t *testing.T) {
 		t.Fatalf("a model call to a harness read: %v", err)
 	}
 
-	h.backend.Own = threads.Metrics{Views: 31, Likes: 4, Replies: 2, Reposts: 1}
-	out, err := h.call("read_own_metrics", `{}`)
-	if err != nil {
-		t.Fatalf("aggregate read: %v", err)
-	}
-	envelope := decodeBrowserEnvelope(t, out)
-	var aggregate threads.Metrics
-	if err := json.Unmarshal(envelope.Data, &aggregate); err != nil {
-		t.Fatal(err)
-	}
-	if aggregate != h.backend.Own {
-		t.Fatalf("aggregate metrics = %+v", aggregate)
-	}
-	if aggregateReads(h.backend) != 1 {
-		t.Fatalf("aggregate backend calls = %d", aggregateReads(h.backend))
+	followers := int64(31)
+	for _, tc := range []struct {
+		name string
+		own  threads.OwnFollowers
+		want string
+	}{
+		{"known", threads.OwnFollowers{Followers: &followers}, `{"followers_count":31}`},
+		{"unavailable", threads.OwnFollowers{}, `{"followers_count":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBrowserHarness(t, true)
+			h.backend.Own = tc.own
+			out, err := h.call("read_own_metrics", `{}`)
+			if err != nil {
+				t.Fatalf("aggregate read: %v", err)
+			}
+			if got := string(decodeBrowserEnvelope(t, out).Data); got != tc.want {
+				t.Fatalf("data = %s, want %s", got, tc.want)
+			}
+			if aggregateReads(h.backend) != 1 {
+				t.Fatalf("aggregate backend calls = %d", aggregateReads(h.backend))
+			}
+		})
 	}
 }
 

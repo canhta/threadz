@@ -66,13 +66,6 @@ func newEvalBrowser(snapshots map[string]json.RawMessage, scenario string, st *s
 	for _, read := range []struct{ op, fixture string }{{threads.OpReadFeed, feed}, {threads.OpSearch, "search"}, {threads.OpReadPost, post}} {
 		m.Pages[read.op], m.Errors[read.op] = parse(read.fixture)
 	}
-	var own struct {
-		Metrics threads.Metrics `json:"metrics"`
-	}
-	if err := json.Unmarshal(snapshots["metrics"], &own); err != nil {
-		m.Errors[threads.OpReadOwnMetrics] = err
-	}
-	m.Own = own.Metrics
 	var submitted struct {
 		ThreadURL string `json:"thread_url"`
 	}

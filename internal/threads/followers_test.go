@@ -55,9 +55,9 @@ func TestLiveReadOwnMetricsPrefersTheProfilePageCount(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			l, fake := liveWith(t, tc.driver)
 			l.username = tc.user
-			fake.route("GET", "/1000000000000001/threads_insights", "account_insights.json", "followers.json")
+			fake.route("GET", "/1000000000000001/threads_insights", "followers.json")
 			m, err := l.ReadOwnMetrics(context.Background())
-			if err != nil || m.Followers == nil || *m.Followers != tc.want || m.FollowersSource != tc.source || m.Views != 1204 {
+			if err != nil || m.Followers == nil || *m.Followers != tc.want || m.Source != tc.source {
 				t.Fatalf("metrics=%+v err=%v", m, err)
 			}
 			if tc.user != "" && (len(tc.driver.destinations) != 1 || tc.driver.destinations[0] != "https://fixture.test/@me") {

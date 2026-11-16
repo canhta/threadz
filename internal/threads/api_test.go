@@ -143,11 +143,14 @@ func TestAPIReads(t *testing.T) {
 func TestAPIInsightsAndFollowers(t *testing.T) {
 	f, api, _ := newFake(t)
 	ctx := context.Background()
-	f.route("GET", "/1000000000000001/threads_insights", "account_insights.json", "followers.json")
-	m, err := api.ReadOwnMetrics(ctx)
-	want := Metrics{Views: 1204, Likes: 31, Replies: 4, Reposts: 2, Quotes: n64(1), Followers: n64(0)}
-	if err != nil || !reflect.DeepEqual(m, want) {
-		t.Fatalf("account=%+v err=%v", m, err)
+	f.route("GET", "/1000000000000001/threads_insights", "followers.json")
+	n, err := api.ReadFollowers(ctx)
+	if err != nil || n == nil || *n != 0 {
+		t.Fatalf("followers=%v err=%v", n, err)
+	}
+	f.route("GET", "/1000000000000001/threads_insights", `{"data":[]}`)
+	if n, err := api.ReadFollowers(ctx); err != nil || n != nil {
+		t.Fatalf("no followers_count: %v err=%v", n, err)
 	}
 
 	f.route("GET", "/insights", batchBody("2000000000000001", string(apiFixture(t, "post_insights.json"))))

@@ -13,7 +13,7 @@ func TestMemoryServesConfiguredPagesAndRecordsCalls(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
 	m.Pages[OpSearch] = Page{Kind: "search", Posts: []Post{{URL: "https://t.test/a"}}}
-	m.Own = Metrics{Views: 9}
+	m.Own = OwnFollowers{Followers: n64(9)}
 	m.Actions["own"] = Metrics{Likes: 4}
 	m.Results[OpPost] = "https://t.test/new"
 	m.Results[OpReply] = "https://t.test/reply"
@@ -27,7 +27,7 @@ func TestMemoryServesConfiguredPagesAndRecordsCalls(t *testing.T) {
 	if p, err := m.ReadPost(ctx, "https://t.test/p"); err != nil || p.Kind != "post" {
 		t.Fatalf("post=%+v err=%v", p, err)
 	}
-	if v, err := m.ReadOwnMetrics(ctx); err != nil || v.Views != 9 {
+	if v, err := m.ReadOwnMetrics(ctx); err != nil || v.Followers == nil || *v.Followers != 9 {
 		t.Fatalf("own=%+v err=%v", v, err)
 	}
 	batch := m.ReadActionMetricsBatch(ctx, []string{"own", "other"})

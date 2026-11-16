@@ -72,12 +72,12 @@ func (d *Dispatcher) browserRead(ctx context.Context, tool, operation string, a 
 			return d.actionMetrics(ctx, ids)
 		}
 		own, err := d.opts.Threads.ReadOwnMetrics(ctx)
-		if err == nil && own.FollowersSource != "" {
-			logging.Emit(context.WithoutCancel(ctx), d.opts.Logger, slog.LevelInfo, logging.Record{Event: logging.BrowserOperationFinished, AgentID: d.opts.Template.ID, Phase: d.opts.Phase, WakeID: d.opts.WakeID, Operation: "read_followers", Tool: tool, Outcome: "success", Reason: own.FollowersSource})
+		if err == nil && own.Source != "" {
+			logging.Emit(context.WithoutCancel(ctx), d.opts.Logger, slog.LevelInfo, logging.Record{Event: logging.BrowserOperationFinished, AgentID: d.opts.Template.ID, Phase: d.opts.Phase, WakeID: d.opts.WakeID, Operation: "read_followers", Tool: tool, Outcome: "success", Reason: own.Source})
 		}
 		if err == nil && own.Followers != nil {
 			// A failed write only leaves the older follower figure on the facts sheet.
-			_ = d.opts.Store.RecordFollowers(ctx, d.opts.Template.ID, *own.Followers, own.FollowersSource, started)
+			_ = d.opts.Store.RecordFollowers(ctx, d.opts.Template.ID, *own.Followers, own.Source, started)
 		}
 		return own, err
 	}

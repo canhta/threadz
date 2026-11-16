@@ -43,7 +43,7 @@ type Memory struct {
 	Replies map[string]Page
 	// Own answers read_own_metrics; Actions answers per-post metrics by media id
 	// and reports ErrMetricsUnavailable for an id it does not hold.
-	Own Metrics
+	Own OwnFollowers
 	// Account answers read_account_insights; its window is the one asked for.
 	Account AccountInsights
 	// Quota answers publishing_limit.
@@ -183,9 +183,9 @@ func (m *Memory) PublishingLimit(ctx context.Context) (Quota, error) {
 	}
 	return m.Quota, nil
 }
-func (m *Memory) ReadOwnMetrics(ctx context.Context) (Metrics, error) {
+func (m *Memory) ReadOwnMetrics(ctx context.Context) (OwnFollowers, error) {
 	if err := m.serve(ctx, Call{Op: OpReadOwnMetrics}); err != nil {
-		return Metrics{}, err
+		return OwnFollowers{}, err
 	}
 	return m.Own, nil
 }

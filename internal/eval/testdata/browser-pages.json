@@ -32,15 +32,6 @@
     ],
     "kind": "post"
   },
-  "metrics": {
-    "metrics": {
-      "views": 123,
-      "likes": 7,
-      "replies": 3,
-      "reposts": 1
-    },
-    "kind": "metrics"
-  },
   "submitted": {
     "thread_url": "https://www.threads.com/confirmed",
     "kind": "submitted"

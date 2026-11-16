@@ -25,7 +25,6 @@ const (
 	CaptureOwnReplyMetric  = "own_reply_insights.json"
 	CaptureOwnReplyReplies = "own_reply_replies.json"
 	CaptureMentions        = "mentions.json"
-	CaptureAccount         = "account_insights.json"
 	CaptureFollowers       = "followers.json"
 )
 
@@ -121,7 +120,6 @@ func (a *API) Capture(ctx context.Context) (map[string][]byte, error) {
 		q          url.Values
 	}{
 		{CaptureMentions, "/" + a.o.UserID + "/mentions", url.Values{"fields": {postFields}}},
-		{CaptureAccount, insights, url.Values{"metric": {accountMetrics}}},
 		{CaptureFollowers, insights, url.Values{"metric": {"followers_count"}}},
 	} {
 		if raw, err = get(call.file, call.path, call.q); err == nil {

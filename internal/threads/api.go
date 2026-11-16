@@ -62,7 +62,6 @@ const (
 	maxResponseBytes   = 4 << 20
 	postFields         = "id,permalink,text,username,timestamp,is_reply"
 	postMetrics        = "views,likes,replies,reposts,quotes,shares"
-	accountMetrics     = "views,likes,replies,reposts,quotes"
 )
 
 // NewAPI returns a client; BaseURL defaults to APIBaseURL.
@@ -438,23 +437,15 @@ func (a *API) countOwnReplyComments(ctx context.Context, ids []string, out map[s
 // replyCountCap bounds the direct replies counted for an own reply comment.
 const replyCountCap = 100
 
-// ReadOwnMetrics returns the account insights and the follower count.
-func (a *API) ReadOwnMetrics(ctx context.Context) (Metrics, error) {
-	var acct, fol insights
-	path := "/" + a.o.UserID + "/threads_insights"
-	if err := a.do(ctx, http.MethodGet, path, url.Values{"metric": {accountMetrics}}, &acct); err != nil {
-		return Metrics{}, err
+// ReadFollowers returns the insights API `followers_count`; nil when the API
+// returned none.
+func (a *API) ReadFollowers(ctx context.Context) (*int64, error) {
+	var fol insights
+	if err := a.do(ctx, http.MethodGet, "/"+a.o.UserID+"/threads_insights", url.Values{"metric": {"followers_count"}}, &fol); err != nil {
+		return nil, err
 	}
-	if err := a.do(ctx, http.MethodGet, path, url.Values{"metric": {"followers_count"}}, &fol); err != nil {
-		return Metrics{}, err
-	}
-	m, err := acct.metrics()
-	if err != nil {
-		return Metrics{}, err
-	}
-	f, err := fol.metrics()
-	m.Followers = f.Followers
-	return m, err
+	m, err := fol.metrics()
+	return m.Followers, err
 }
 
 // Quota is the documented publishing limit and its use over its window.

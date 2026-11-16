@@ -241,7 +241,6 @@ func TestBrowserReadToolsUseBackendAndLabelUntrusted(t *testing.T) {
 			AddressedToAgent: true,
 		}},
 	}
-	h.backend.Own = threads.Metrics{Views: 123, Likes: 7, Replies: 3, Reposts: 1}
 
 	feed := decodeBrowserEnvelope(t, h.mustCall("find_posts", `{"source":"feed"}`))
 	if feed.Source != "find_posts" {
@@ -298,12 +297,8 @@ func TestBrowserReadToolsUseBackendAndLabelUntrusted(t *testing.T) {
 	if metrics.Source != "read_own_metrics" {
 		t.Fatalf("metrics source %q", metrics.Source)
 	}
-	var m threads.Metrics
-	if err := json.Unmarshal(metrics.Data, &m); err != nil {
-		t.Fatal(err)
-	}
-	if m != (threads.Metrics{Views: 123, Likes: 7, Replies: 3, Reposts: 1}) {
-		t.Fatalf("metrics %+v", m)
+	if string(metrics.Data) != `{"followers_count":null}` {
+		t.Fatalf("metrics %s", metrics.Data)
 	}
 
 	if got := countActions(t, h); got != 0 {
@@ -779,7 +774,7 @@ func TestReadRepliesObservesStopRequestsInMentionsAndLabelsUntrusted(t *testing.
 
 func TestReadOwnMetricsRecordsTheFollowerCountForTheFactSheet(t *testing.T) {
 	h := newBrowserHarness(t, true)
-	h.backend.Own = threads.Metrics{Views: 5, Followers: func() *int64 { n := int64(17); return &n }()}
+	h.backend.Own = threads.OwnFollowers{Followers: func() *int64 { n := int64(17); return &n }(), Source: threads.FollowersFromBrowser}
 	h.mustCall("read_own_metrics", `{}`)
 	n, ok, err := h.store.LatestFollowers(context.Background(), h.opts.Template.ID)
 	if err != nil || !ok || n != 17 {

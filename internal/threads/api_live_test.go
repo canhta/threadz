@@ -16,7 +16,7 @@ func (envToken) Token(context.Context) (config.Secret, error) {
 	return config.NewSecret(os.Getenv("THREADS_ACCESS_TOKEN")), nil
 }
 
-// TestLiveSmokeReadOnly reads /me, account insights, followers_count and the
+// TestLiveSmokeReadOnly reads /me, followers_count and the
 // publishing limit of the tester account. It never publishes. Opt in with
 // THREADZ_LIVE_THREADS=1 plus THREADS_ACCESS_TOKEN and THREADS_USER_ID.
 func TestLiveSmokeReadOnly(t *testing.T) {
@@ -40,13 +40,9 @@ func TestLiveSmokeReadOnly(t *testing.T) {
 	if err = api.do(ctx, "GET", "/"+api.o.UserID+"/threads_insights", map[string][]string{"metric": {"followers_count"}}, &followers); err != nil || len(followers.Data) != 1 || followers.Data[0].Name != "followers_count" {
 		t.Fatalf("followers_count: %v", err)
 	}
-	m, err := api.ReadOwnMetrics(ctx)
-	if err != nil || m.Views < 0 || m.Followers == nil || *m.Followers < 0 {
-		t.Fatalf("account insights %+v: %v", m, err)
-	}
 	q, err := api.PublishingLimit(ctx)
 	if err != nil || q.PostsTotal <= 0 || q.RepliesTotal <= 0 {
 		t.Fatalf("publishing limit %+v: %v", q, err)
 	}
-	t.Logf("live read-only: /me ok, followers_count ok, account insights views=%d likes=%d followers=%v, posts quota %d/%d, replies quota %d/%d", m.Views, m.Likes, m.Followers != nil, q.PostsUsed, q.PostsTotal, q.RepliesUsed, q.RepliesTotal)
+	t.Logf("live read-only: /me ok, followers_count ok, posts quota %d/%d, replies quota %d/%d", q.PostsUsed, q.PostsTotal, q.RepliesUsed, q.RepliesTotal)
 }

@@ -374,7 +374,6 @@ func isolationBackend(active *int, ownURL string) *threads.Memory {
 	m := threads.NewMemory()
 	own := threads.Metrics{Views: 40, Likes: 2}
 	m.Pages[threads.OpReadFeed] = threads.Page{Kind: "feed", Posts: []threads.Post{}}
-	m.Own = own
 	m.Actions[threads.SyntheticID(ownURL)] = own
 	for _, op := range []string{threads.OpSearch, threads.OpReadPost, threads.OpPost, threads.OpReply} {
 		m.Errors[op] = errors.New("synthetic source: unexpected " + op)
