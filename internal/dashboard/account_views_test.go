@@ -125,18 +125,20 @@ func withInteractions(days []store.DashboardAccountDay, by map[string]int64) []s
 
 func TestInteractionsKPIChangeChartAndGapDay(t *testing.T) {
 	s := accountSnapshot()
-	// 2026-11-09 has views but no interactions: a gap, never a zero. 2026-11-08
-	// has neither. The prior 7 days hold 3 interactions.
+	// 2026-11-09 has views but no interactions and 2026-11-08 has interactions
+	// but no views: neither is aligned, so neither is a zero or a sum. The 4
+	// aligned days of the range sum to 6+5+2+1; of them only 11-11 and 11-10
+	// have a counterpart a period earlier (11-04, 11-03) that is aligned.
 	s.AccountDays = withInteractions(s.AccountDays, map[string]int64{
-		"2026-11-11": 6, "2026-11-10": 5, "2026-11-07": 2, "2026-11-06": 1,
+		"2026-11-11": 6, "2026-11-10": 5, "2026-11-08": 9, "2026-11-07": 2, "2026-11-06": 1,
 		"2026-11-04": 1, "2026-11-03": 1, "2026-11-02": 1,
 	})
 	g := mustPage(t, newHandler(newSource(s))).Growth
-	if !g.HasInteractions || g.Interactions != 14 || g.InteractionsDelta != "up 367% on the previous 7 days" {
-		t.Fatalf("interactions = %d (has %v) delta %q, want 6+5+2+1 against 3", g.Interactions, g.HasInteractions, g.InteractionsDelta)
+	if !g.HasInteractions || g.Interactions != 14 || g.InteractionsCounted != 4 || g.InteractionsDelta != "up 450% on the previous period" {
+		t.Fatalf("interactions = %d over %d days (has %v) delta %q, want 14 over 4 and 6+5 against 1+1", g.Interactions, g.InteractionsCounted, g.HasInteractions, g.InteractionsDelta)
 	}
 	kpis := mustPage(t, newHandler(newSource(s))).KPIs
-	if kpis[2].Label != "Interactions in 7 days" || kpis[2].Value != "14" || kpis[2].Note != g.InteractionsDelta || kpis[2].Tone != "up" {
+	if kpis[2].Label != "Interactions in 7 days" || kpis[2].Value != "14" || kpis[2].Note != "up 450% on the previous period, 4 of 7 days counted" || kpis[2].Tone != "up" {
 		t.Fatalf("KPI = %+v", kpis[2])
 	}
 	if g.InteractionsChart.Title != "Interactions per day" {
@@ -146,7 +148,7 @@ func TestInteractionsKPIChangeChartAndGapDay(t *testing.T) {
 	for _, row := range g.InteractionsChart.Rows {
 		cells = append(cells, row[1])
 	}
-	if got := strings.Join(cells, ","); got != "1,2,—,—,5,6,—" {
+	if got := strings.Join(cells, ","); got != "1,2,9,—,5,6,—" {
 		t.Fatalf("chart cells = %s", got)
 	}
 
@@ -154,5 +156,49 @@ func TestInteractionsKPIChangeChartAndGapDay(t *testing.T) {
 	page := mustPage(t, newHandler(newSource(s)))
 	if page.Growth.HasInteractions || page.KPIs[2].Value != "—" || page.KPIs[2].Note != "" {
 		t.Fatalf("without any interactions: %+v", page.KPIs[2])
+	}
+	// Interactions on days without views are not aligned with anything.
+	s.AccountDays = withInteractions(accountSnapshot().AccountDays, map[string]int64{"2026-11-08": 9, "2026-11-05": 4})
+	page = mustPage(t, newHandler(newSource(s)))
+	if page.Growth.HasInteractions || page.KPIs[2].Value != "—" {
+		t.Fatalf("without an aligned day: %+v", page.KPIs[2])
+	}
+}
+
+func TestInteractionsWithoutAnAlignedDayInThePriorPeriodShowNoChange(t *testing.T) {
+	s := accountSnapshot()
+	s.AccountDays = withInteractions(s.AccountDays, map[string]int64{"2026-11-11": 6, "2026-11-10": 5, "2026-11-07": 2, "2026-11-06": 1, "2026-11-09": 3, "2026-11-05": 9})
+	kpi := mustPage(t, newHandler(newSource(s))).KPIs[2]
+	// The days a period earlier that have views (11-04, 11-03, 11-02) pair with
+	// the days 11-11, 11-10 and 11-09 and none of them has interactions.
+	if kpi.Value != "17" || kpi.Note != "5 of 7 days counted" || kpi.Tone != "" {
+		t.Fatalf("KPI = %+v, want the sum of 5 aligned days and no change", kpi)
+	}
+	if g := mustPage(t, newHandler(newSource(s))).Growth; g.InteractionsDelta != "" {
+		t.Fatalf("change = %q, want none", g.InteractionsDelta)
+	}
+}
+
+func TestInteractionsOverEveryDayCountNoDays(t *testing.T) {
+	s := measured()
+	s.AccountDays = flatAccountDays("2026-11-11")
+	for i := range s.AccountDays {
+		s.AccountDays[i].Interactions = n64(5)
+		if i >= 7 {
+			s.AccountDays[i].Interactions = n64(4)
+		}
+	}
+	kpi := mustPage(t, newHandler(newSource(s))).KPIs[2]
+	if kpi.Value != "35" || kpi.Note != "up 25% on the previous 7 days" {
+		t.Fatalf("KPI = %+v, want all 7 days counted with no count in the note", kpi)
+	}
+}
+
+func TestOwnPostCountsAreLabelledAsOwnPosts(t *testing.T) {
+	body := get(newHandler(newSource(accountSnapshot())), "/").Body.String()
+	for _, label := range []string{"Likes on your posts", "Replies to your posts", "Reposts of your posts"} {
+		if !strings.Contains(body, "<dt>"+label+"</dt>") {
+			t.Errorf("page has no %q", label)
+		}
 	}
 }

@@ -9,8 +9,8 @@ import "strings"
 var toolLabels = map[string]string{
 	"find_posts":              "Find posts",
 	"read_own_metrics":        "Own stats",
-	"read_account_insights":   "Account stats",
-	"read_account_totals_day": "Account stats",
+	"read_account_insights":   "Account views and clicks",
+	"read_account_totals_day": "Account interactions",
 	"fetch_trends":            "Trends",
 	"read_replies":            "Read replies",
 	"read_post":               "Read post",

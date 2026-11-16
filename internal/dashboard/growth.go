@@ -64,15 +64,52 @@ func (a accountSeries) total(from, to time.Time) (views, attributed int64, ok bo
 	return views, attributed, ok
 }
 
-// totalInteractions sums the interactions of the days from from up to but
-// excluding to; ok is false when none of them has a value.
-func (a accountSeries) totalInteractions(from, to time.Time) (n int64, ok bool) {
+// aligned reports whether the day has views and all four interaction totals.
+func (a accountSeries) aligned(day string) bool {
+	_, hasViews := a.views[day]
+	_, hasInteractions := a.interactions[day]
+	return hasViews && hasInteractions
+}
+
+// totalInteractions sums the interactions of the aligned days from from up to
+// but excluding to and counts them.
+func (a accountSeries) totalInteractions(from, to time.Time) (n int64, counted int) {
 	for d := from; d.Before(to); d = d.AddDate(0, 0, 1) {
-		if v, has := a.interactions[d.Format("2006-01-02")]; has {
-			n, ok = n+v, true
+		if key := d.Format("2006-01-02"); a.aligned(key) {
+			n += a.interactions[key]
+			counted++
 		}
 	}
-	return n, ok
+	return n, counted
+}
+
+// interactionsPairs sums the interactions of the days that are aligned in both
+// the days-day period starting at start and the one before it, matching the two
+// periods day by day, and counts the pairs. Both sums cover the same days, so
+// their change compares like with like.
+func (a accountSeries) interactionsPairs(start time.Time, days int) (cur, prior int64, pairs int) {
+	for i := range days {
+		c, p := start.AddDate(0, 0, i), start.AddDate(0, 0, i-days)
+		ck, pk := c.Format("2006-01-02"), p.Format("2006-01-02")
+		if a.aligned(ck) && a.aligned(pk) {
+			cur, prior, pairs = cur+a.interactions[ck], prior+a.interactions[pk], pairs+1
+		}
+	}
+	return cur, prior, pairs
+}
+
+// chartSum sums m over the days from from up to but excluding to; ok is false
+// when any of them has no value, so a chart point over several days with a
+// missing one is a gap and never a smaller value.
+func chartSum(m map[string]int64, from, to time.Time) (n int64, ok bool) {
+	for d := from; d.Before(to); d = d.AddDate(0, 0, 1) {
+		v, has := m[d.Format("2006-01-02")]
+		if !has {
+			return 0, false
+		}
+		n += v
+	}
+	return n, true
 }
 
 // metricSample is one cumulative measurement of an own publication. Views and

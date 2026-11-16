@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -52,25 +53,67 @@ func TestAccountInsightsParsesSavedReads(t *testing.T) {
 
 func TestAccountTotalsDayParsesSavedRead(t *testing.T) {
 	f, api, _ := newFake(t)
-	day := PacificDays(time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC))[0]
+	day := mustPacificDay(t, "2026-11-14")
 	f.route("GET", accountPath, "account_totals_day.json")
 	f.headers = map[string]string{"GET " + accountPath: `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":7}]}`}
 	got, err := api.ReadAccountTotalsDay(context.Background(), day)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := DayTotals{PacificDay: day, Totals: map[string]int64{"likes": 293, "replies": 66, "reposts": 0, "quotes": 0}, RegainAfter: 7 * time.Minute}
+	want := DayTotals{PacificDay: day, Totals: map[string]int64{"likes": 168, "replies": 40, "reposts": 0, "quotes": 0}, RegainAfter: 7 * time.Minute}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("day totals = %+v\nwant %+v", got, want)
 	}
 	q := f.queries["GET "+accountPath]
-	if q["metric"] != "likes,replies,reposts,quotes" || q["since"] != "1794643200" || q["until"] != "1794729600" {
+	if q["metric"] != "likes,replies,reposts,quotes" || q["since"] != "1794729600" || q["until"] != "1794733200" {
 		t.Fatalf("query = %v", q)
 	}
 }
 
+func mustPacificDay(t *testing.T, date string) PacificDay {
+	t.Helper()
+	day, err := ParsePacificDay(date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return day
+}
+
+// The API totals every bucket whose end_time lies in [since, until], both ends
+// inclusive; the bucket of a Pacific day ends at the midnight that closes it,
+// so one hour after that midnight selects that day alone.
+func TestAccountTotalsDayWindowIsTheClosingMidnightAndOneHour(t *testing.T) {
+	for _, c := range []struct {
+		date, starts, since string
+	}{
+		{"2026-11-14", "2026-11-14T08:00:00Z", "2026-11-15T08:00:00Z"},
+		{"2026-03-08", "2026-03-08T08:00:00Z", "2026-03-09T07:00:00Z"},
+		{"2026-11-01", "2026-11-01T07:00:00Z", "2026-11-02T08:00:00Z"},
+	} {
+		day := mustPacificDay(t, c.date)
+		if day.Day != c.date || day.StartsAt.Format(time.RFC3339) != c.starts || day.EndsAt.Format(time.RFC3339) != c.since {
+			t.Errorf("Pacific day %s = %+v", c.date, day)
+		}
+		f, api, _ := newFake(t)
+		f.route("GET", accountPath, "account_totals_day.json")
+		if _, err := api.ReadAccountTotalsDay(context.Background(), day); err != nil {
+			t.Fatal(err)
+		}
+		since := day.EndsAt
+		q := f.queries["GET "+accountPath]
+		if q["since"] != strconv.FormatInt(since.Unix(), 10) || q["until"] != strconv.FormatInt(since.Add(time.Hour).Unix(), 10) {
+			t.Errorf("%s: query = %v, want since %d and until one hour later", c.date, q, since.Unix())
+		}
+	}
+	for _, bad := range []string{"", "2026-13-01", "11-14-2026", "2026-11-31"} {
+		if _, err := ParsePacificDay(bad); err == nil {
+			t.Errorf("ParsePacificDay(%q) accepted", bad)
+		}
+	}
+}
+
 func TestAccountTotalsDayRefusals(t *testing.T) {
-	day := PacificDays(time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC))[0]
+	day := mustPacificDay(t, "2026-11-14")
 	for name, body := range map[string]string{
 		"no metrics":      `{"data":[]}`,
 		"a metric absent": `{"data":[{"name":"likes","total_value":{"value":5}},{"name":"replies","total_value":{"value":1}},{"name":"reposts","total_value":{"value":0}}]}`,
@@ -89,6 +132,24 @@ func TestAccountTotalsDayRefusals(t *testing.T) {
 	var limited *RateLimitedError
 	if _, err := api.ReadAccountTotalsDay(context.Background(), day); !errors.As(err, &limited) || limited.Wait != 12*time.Minute {
 		t.Errorf("failed read under a wait: %v", err)
+	}
+	f, api, _ = newFake(t)
+	f.route("GET", accountPath, `{"data":[]}`)
+	f.headers = map[string]string{"GET " + accountPath: `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":9}]}`}
+	if _, err := api.ReadAccountTotalsDay(context.Background(), day); !errors.Is(err, ErrMetricsUnavailable) || !errors.As(err, &limited) || limited.Wait != 9*time.Minute {
+		t.Errorf("refused read under a wait: %v", err)
+	}
+	f, api, _ = newFake(t)
+	f.route("GET", accountPath, `{"data":[{"name":"likes","total_value":{"value":-1}}]}`)
+	f.headers = map[string]string{"GET " + accountPath: `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":4}]}`}
+	if _, err := api.ReadAccountTotalsDay(context.Background(), day); !errors.As(err, &limited) || limited.Wait != 4*time.Minute {
+		t.Errorf("invalid total under a wait: %v", err)
+	}
+	f, api, _ = newFake(t)
+	f.route("GET", accountPath, `{"data":[]}`)
+	f.headers = map[string]string{"GET " + accountPath: `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":6}]}`}
+	if _, err := api.ReadAccountInsights(context.Background(), day.StartsAt, day.EndsAt); !errors.As(err, &limited) || limited.Wait != 6*time.Minute {
+		t.Errorf("refused views read under a wait: %v", err)
 	}
 }
 

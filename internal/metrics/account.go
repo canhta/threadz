@@ -100,9 +100,12 @@ func (p *Processor) readAccount(ctx context.Context, dispatcher *tools.Dispatche
 		p.accountFailed(now, err)
 		return metricError("storing account insights", err)
 	}
-	regain, ok, err := p.readAccountTotals(ctx, dispatcher, wakeID, now)
-	if err != nil || !ok {
-		return err
+	var regain time.Duration
+	if in.RegainAfter == 0 {
+		var ok bool
+		if regain, ok, err = p.readAccountTotals(ctx, dispatcher, wakeID, now); err != nil || !ok {
+			return err
+		}
 	}
 	p.accountMu.Lock()
 	p.accountLast, p.accountFailures = now, 0
@@ -117,31 +120,35 @@ func (p *Processor) readAccount(ctx context.Context, dispatcher *tools.Dispatche
 }
 
 // readAccountTotals reads, newest first, each Pacific day due its likes,
-// replies, reposts and quotes (store.AccountTotalsDue) and stores them. A day
-// the API has no totals for stays without a value and is retried by the next
-// read. It stops at the first failure, which it reports as accountReadFailed
-// does, or when a usage wait is asked for; it returns that wait;
-// ok is false when the read failed.
+// replies, reposts and quotes (store.AccountTotalsDue) and stores them, at most
+// accountPassReads reads a pass. A day the API refuses stays without a value
+// and is read again by a later pass, accountRefusedTries times and then not
+// before accountRefusedWait. It stops at the first failure, which it reports as
+// accountReadFailed does, or when a read asks for a usage wait; it returns that
+// wait; ok is false when the read failed.
 func (p *Processor) readAccountTotals(ctx context.Context, dispatcher *tools.Dispatcher, wakeID int64, now time.Time) (regain time.Duration, ok bool, err error) {
 	id := p.opts.Template.ID
-	since, until := threads.AccountWindow(now, 1)
-	closed, _ := time.Parse(time.DateOnly, threads.PacificDays(since, until)[0].Day)
-	since, until = threads.AccountWindow(now, threads.AccountTrailingDays)
+	since, until := threads.AccountWindow(now, threads.AccountTrailingDays)
 	due, err := p.opts.Store.AccountTotalsDue(ctx, id, threads.AccountTotalMetrics, threads.PacificDays(since, until)[0].Day, accountTotalsDays)
 	if err != nil {
 		return 0, false, metricError("listing account days due for totals", err)
 	}
-	for i, day := range due {
-		if regain > 0 {
+	reads := 0
+	for _, day := range due {
+		if regain > 0 || reads == accountPassReads {
 			break
 		}
-		date, err := time.Parse(time.DateOnly, day)
-		if err != nil {
-			return 0, false, metricError("reading a stored account day", err)
+		if p.accountRefusedUntil(day).After(now) {
+			continue
 		}
-		daysAgo := int(closed.Sub(date).Hours()/24) + 1
-		output, err := p.dispatchAccount(ctx, dispatcher, fmt.Sprintf("account-%d-%d", wakeID, i), "read_account_totals_day", fmt.Sprintf(`{"days_ago":%d}`, daysAgo))
+		output, err := p.dispatchAccount(ctx, dispatcher, fmt.Sprintf("account-%d-%d", wakeID, reads), "read_account_totals_day", fmt.Sprintf(`{"day":%q}`, day))
+		reads++
 		if errors.Is(err, threads.ErrMetricsUnavailable) {
+			p.accountDayRefused(day, now)
+			var limited *threads.RateLimitedError
+			if errors.As(err, &limited) {
+				regain = limited.Wait
+			}
 			continue
 		}
 		if err != nil {
@@ -161,9 +168,35 @@ func (p *Processor) readAccountTotals(ctx context.Context, dispatcher *tools.Dis
 				return 0, false, metricError("storing account day totals", err)
 			}
 		}
+		p.accountMu.Lock()
+		delete(p.accountRefused, day)
+		p.accountMu.Unlock()
 		regain = d.RegainAfter
 	}
 	return regain, true, nil
+}
+
+// accountRefusedUntil is when a day the API refused may be read again; the
+// zero time for a day that is not waiting.
+func (p *Processor) accountRefusedUntil(day string) time.Time {
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	return p.accountRefused[day].notBefore
+}
+
+// accountDayRefused counts a refusal of the day; the third in a row starts the
+// wait and the count over.
+func (p *Processor) accountDayRefused(day string, now time.Time) {
+	p.accountMu.Lock()
+	defer p.accountMu.Unlock()
+	if p.accountRefused == nil {
+		p.accountRefused = map[string]refusedDay{}
+	}
+	r := p.accountRefused[day]
+	if r.tries++; r.tries == accountRefusedTries {
+		r = refusedDay{notBefore: now.Add(accountRefusedWait)}
+	}
+	p.accountRefused[day] = r
 }
 
 func (p *Processor) dispatchAccount(ctx context.Context, dispatcher *tools.Dispatcher, id, tool, args string) (string, error) {

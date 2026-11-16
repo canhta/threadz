@@ -120,9 +120,9 @@ A request runs no LLM call, agent action, schema change or agent initialization.
 | Methods | GET and HEAD. `/unlock` also accepts POST |
 | Unknown path | 404, before the database is opened |
 | `/unlock` | The authentication form. Content mode only; never reads the database |
-| `?agent`, `?range` | The only parameters read. Defaults: first agent, 7 days. Ranges: 7, 14, 30, 90 |
-| Bad `agent` or `range` | 400, before any database read |
-| Any other parameter | Ignored, so `fbclid` and `utm_*` on a shared link still reach the page. The cache key is the agent and range alone, so they neither read nor fill a second entry |
+| `?agent`, `?range`, `?sort`, `?show` | The only parameters read. Defaults: first agent, 7 days, `recent`, 6 posts. Ranges: 7, 14, 30, 90. Sorts: `recent`, `views`, `replies`. Shows: 6, 18, 30, 42 |
+| Bad `agent`, `range`, `sort` or `show`, or one given twice | 400, before any database read |
+| Any other parameter | Ignored, so `fbclid` and `utm_*` on a shared link still reach the page. The cache key is the scheme and host of the request with the four parameters above, so an ignored parameter neither reads nor fills a second entry |
 | Query over 1024 bytes | Refused |
 
 The page reads top to bottom in priority order. First a hero: views, followers and interactions,
@@ -137,7 +137,7 @@ Sections run in this order; missing values show `—`.
 | Section | Shows |
 |---|---|
 | Top bar | Agent, status, test mode, last and next run in the owner's zone (`telegram.timezone`, else schedule zone, else UTC), range links |
-| KPI cells | Posts, replies, followers with change, views and interactions (the sums of the account's daily views and of its daily likes, replies, reposts and quotes, `account_daily`) each with change against the previous period, spend today against the daily limit. Counts cover every real publication under the agent's own username, from a SQL aggregate, never truncated |
+| KPI cells | Posts, replies, followers with change, views and interactions (the sum of the account's daily views, and of its daily likes, replies, reposts and quotes over the days that have all five, `account_daily`; [threads.md](threads.md#account-insights)) each with change against the previous period, spend today against the daily limit. Counts cover every real publication under the agent's own username, from a SQL aggregate, never truncated |
 | Posts | Own posts and replies in the order the reader picks, as Threads offers: Latest (default), Most views, Most replies. Each row shows the text linked to the post, age, Deleted label, views, likes, replies and reposts, with no rate and no best or worst mark. Top performers are the posts with the most views. Blocked posts counted by rule. |
 | Growth | Inline-SVG charts of views (account daily views; a day without a value is a gap), interactions and followers per day; a line of how many of the range's views the agent's own posts and replies gained ([threads.md](threads.md#account-insights)); changes against the previous period; followers per post and per 1,000 views |
 | Cost | Stacked daily spend by runs and planning against the daily limit |

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/canhta/threadz/internal/config"
 	"github.com/canhta/threadz/internal/guard"
+	"github.com/canhta/threadz/internal/store"
 	"net"
 	"slices"
 	"strings"
@@ -91,12 +92,17 @@ func TestNiceMaxAndAxisLabels(t *testing.T) {
 }
 
 func TestEveryEnumHasAPlainLabel(t *testing.T) {
+	named := map[string]string{}
 	for _, spec := range guard.Specs() {
 		name := spec.Name
 		label := toolLabel(name)
 		if label == "" || label == "Other" {
 			t.Errorf("tool %q has no plain label", name)
 		}
+		if other, dup := named[label]; dup {
+			t.Errorf("tools %q and %q share the label %q", other, name, label)
+		}
+		named[label] = name
 	}
 	for _, kind := range []string{"agent", "metrics", "dream"} {
 		if label := kindLabel(kind); label == "" || label == "Run" && kind != "agent" {
@@ -345,5 +351,40 @@ func TestCountVerbsUsedInState(t *testing.T) {
 				t.Errorf("state label %d %q/%q = %q want %q", n, tc.one, tc.many, got, tc.want[n])
 			}
 		}
+	}
+}
+
+func TestInteractionsWeeklyPointWithAMissingDayIsAGap(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	daysList := dayStarts(config.LimitsConfig{}, now, 90)
+	var days []store.DashboardAccountDay
+	for i := len(daysList) - 1; i >= 0; i-- {
+		key := daysList[i].Format("2006-01-02")
+		views, inter := int64(10), int64(2)
+		d := store.DashboardAccountDay{Day: key, Views: &views, Interactions: &inter}
+		switch key {
+		case "2026-11-03":
+			d.Interactions = nil
+		case "2026-10-20":
+			d.Views = nil
+		}
+		days = append(days, d)
+	}
+	g := buildGrowth(metricSet{}, accountFrom(days), 90, daysList, daysList[0], daysList[0].AddDate(0, 0, -90), now, Agent{Location: time.UTC}, postView{})
+	cells := func(c *Chart) []string {
+		var out []string
+		for _, row := range c.Rows {
+			out = append(out, row[1])
+		}
+		return out
+	}
+	// The last week of the 12 ends on 2026-11-12 and holds 11-06..11-12; the
+	// week before holds 10-30..11-05, with 11-03 lacking interactions.
+	inter, views := cells(g.InteractionsChart), cells(g.ViewsChart)
+	if len(inter) != 12 || inter[11] != "14" || inter[10] != "—" || inter[9] != "14" {
+		t.Fatalf("interaction weeks = %v", inter)
+	}
+	if len(views) != 12 || views[11] != "70" || views[10] != "70" || views[8] != "—" {
+		t.Fatalf("view weeks = %v", views)
 	}
 }

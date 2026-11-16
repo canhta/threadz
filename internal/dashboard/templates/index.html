@@ -84,9 +84,9 @@
         {{if .Followers.HasData}}{{template "chart" .Followers.Chart}}{{end}}
       </div>
       <dl class="facts">
-        <div><dt>Likes</dt><dd>{{formatCount .Growth.Likes}}</dd>{{if .Growth.LikesDelta}}{{$t := deltaTone .Growth.LikesDelta}}<small class="{{$t}}">{{template "tone" $t}}{{.Growth.LikesDelta}}</small>{{end}}</div>
-        <div><dt>Replies received</dt><dd>{{formatCount .Growth.Replies}}</dd>{{if .Growth.RepliesDelta}}{{$t := deltaTone .Growth.RepliesDelta}}<small class="{{$t}}">{{template "tone" $t}}{{.Growth.RepliesDelta}}</small>{{end}}</div>
-        <div><dt>Reposts</dt><dd>{{formatCount .Growth.Reposts}}</dd>{{if .Growth.RepostsDelta}}{{$t := deltaTone .Growth.RepostsDelta}}<small class="{{$t}}">{{template "tone" $t}}{{.Growth.RepostsDelta}}</small>{{end}}</div>
+        <div><dt>Likes on your posts</dt><dd>{{formatCount .Growth.Likes}}</dd>{{if .Growth.LikesDelta}}{{$t := deltaTone .Growth.LikesDelta}}<small class="{{$t}}">{{template "tone" $t}}{{.Growth.LikesDelta}}</small>{{end}}</div>
+        <div><dt>Replies to your posts</dt><dd>{{formatCount .Growth.Replies}}</dd>{{if .Growth.RepliesDelta}}{{$t := deltaTone .Growth.RepliesDelta}}<small class="{{$t}}">{{template "tone" $t}}{{.Growth.RepliesDelta}}</small>{{end}}</div>
+        <div><dt>Reposts of your posts</dt><dd>{{formatCount .Growth.Reposts}}</dd>{{if .Growth.RepostsDelta}}{{$t := deltaTone .Growth.RepostsDelta}}<small class="{{$t}}">{{template "tone" $t}}{{.Growth.RepostsDelta}}</small>{{end}}</div>
         {{if and .Followers.HasData (ne .Followers.PerPost "—")}}<div><dt>Followers per post</dt><dd>{{.Followers.PerPost}}</dd></div>
         <div><dt>Followers per 1,000 views</dt><dd>{{.Followers.Per1000}}</dd></div>{{end}}
         {{with index .KPIs 3}}<div><dt>Posts</dt><dd>{{.Value}}</dd></div>{{end}}

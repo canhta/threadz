@@ -136,18 +136,26 @@ func TestReadAccountTotalsDayIsAHarnessReadOfOneClosedPacificDay(t *testing.T) {
 			t.Fatal("read_account_totals_day is offered to the model")
 		}
 	}
-	if _, err := h.dispatch.Dispatch(context.Background(), llm.ToolCall{ID: "model-call", Type: "function", Function: llm.CallFunction{Name: "read_account_totals_day", Arguments: `{"days_ago":1}`}}); !errors.Is(err, guard.ErrBlocked) {
+	if _, err := h.dispatch.Dispatch(context.Background(), llm.ToolCall{ID: "model-call", Type: "function", Function: llm.CallFunction{Name: "read_account_totals_day", Arguments: `{"day":"2026-11-01"}`}}); !errors.Is(err, guard.ErrBlocked) {
 		t.Fatalf("a model call to a harness read: %v", err)
 	}
 	if _, err := h.call("read_account_totals_day", `{}`); err == nil {
-		t.Fatal("a read without days_ago was served")
+		t.Fatal("a read without day was served")
+	}
+	// The clock reads Pacific 2026-11-10 18:00: that day has not closed.
+	for _, arg := range []string{`{"day":"yesterday"}`, `{"day":"2026-11-10"}`, `{"day":"2999-01-01"}`} {
+		if _, err := h.call("read_account_totals_day", arg); err == nil {
+			t.Fatalf("read %s was served", arg)
+		}
 	}
 
-	since, _ := threads.AccountWindow(h.now, 2)
-	want := threads.PacificDays(since, since.AddDate(0, 0, 1))[0]
+	want, err := threads.ParsePacificDay("2026-11-09")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h.backend.AccountTotals = map[string]map[string]int64{want.Day: {"likes": 5, "replies": 1, "reposts": 0, "quotes": 0}}
 	h.next()
-	out, err := h.call("read_account_totals_day", `{"days_ago":2}`)
+	out, err := h.call("read_account_totals_day", `{"day":"2026-11-09"}`)
 	if err != nil {
 		t.Fatal(err)
 	}

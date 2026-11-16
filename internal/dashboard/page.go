@@ -721,7 +721,7 @@ func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Tim
 		}
 	}
 	g.ViewsChart = lineChart("views", "Views per "+unit, points, func(day time.Time) ([]*float64, []string) {
-		views, _, ok := acct.total(day, day.AddDate(0, 0, step))
+		views, ok := chartSum(acct.views, day, day.AddDate(0, 0, step))
 		if !ok {
 			return []*float64{nil}, []string{"—"}
 		}
@@ -743,15 +743,19 @@ func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Tim
 	}
 
 	if start, ok := acct.rangeStart(days, now); ok {
-		if n, ok := acct.totalInteractions(start, start.AddDate(0, 0, days)); ok {
-			g.HasInteractions, g.Interactions = true, n
-			if prior, ok := acct.totalInteractions(start.AddDate(0, 0, -days), start); ok {
-				g.InteractionsDelta, _ = countDelta(n, prior, countText(days, "day", "days"))
+		if n, counted := acct.totalInteractions(start, start.AddDate(0, 0, days)); counted > 0 {
+			g.HasInteractions, g.Interactions, g.InteractionsCounted = true, n, counted
+			if cur, prior, pairs := acct.interactionsPairs(start, days); pairs > 0 {
+				period := "period"
+				if pairs == days {
+					period = countText(days, "day", "days")
+				}
+				g.InteractionsDelta, _ = countDelta(cur, prior, period)
 			}
 		}
 	}
 	g.InteractionsChart = lineChart("interactions", "Interactions per "+unit, points, func(day time.Time) ([]*float64, []string) {
-		n, ok := acct.totalInteractions(day, day.AddDate(0, 0, step))
+		n, ok := chartSum(acct.interactions, day, day.AddDate(0, 0, step))
 		if !ok {
 			return []*float64{nil}, []string{"—"}
 		}
@@ -917,6 +921,13 @@ func buildKPIs(in kpiInput) []KPI {
 	}
 	if in.growth.HasInteractions {
 		interactions, interactionsNote = formatCount(in.growth.Interactions), in.growth.InteractionsDelta
+		if counted := in.growth.InteractionsCounted; counted < in.days {
+			count := fmt.Sprintf("%d of %d days counted", counted, in.days)
+			if interactionsNote != "" {
+				count = interactionsNote + ", " + count
+			}
+			interactionsNote = count
+		}
 	}
 	var change string
 	if in.followers.HasData {

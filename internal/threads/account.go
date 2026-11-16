@@ -3,6 +3,7 @@ package threads
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -26,7 +27,7 @@ const (
 )
 
 // AccountTotalMetrics are the metrics a one-day read returns as `total_value`.
-// `views` is not among them: the same one-day window returns two buckets.
+// `views` is not among them: its buckets are not totals.
 var AccountTotalMetrics = []string{"likes", "replies", "reposts", "quotes"}
 
 // pacific cannot fail to load: time/tzdata embeds the zone.
@@ -67,6 +68,15 @@ func PacificDays(since, until time.Time) []PacificDay {
 	return out
 }
 
+// ParsePacificDay is the Pacific day of a YYYY-MM-DD date.
+func ParsePacificDay(date string) (PacificDay, error) {
+	start, err := time.ParseInLocation(time.DateOnly, date, pacific)
+	if err != nil {
+		return PacificDay{}, fmt.Errorf("parsing Pacific day: %w", err)
+	}
+	return PacificDays(start, start.AddDate(0, 0, 1))[0], nil
+}
+
 // DayViews is the views of the Pacific day that closed at EndsAt.
 type DayViews struct {
 	EndsAt time.Time
@@ -90,8 +100,8 @@ type AccountInsights struct {
 	RegainAfter  time.Duration
 }
 
-// DayTotals is the likes, replies, reposts and quotes of one Pacific day, read
-// with a window of exactly that day. RegainAfter is as in AccountInsights.
+// DayTotals is the likes, replies, reposts and quotes of one Pacific day.
+// RegainAfter is as in AccountInsights.
 type DayTotals struct {
 	PacificDay
 	Totals      map[string]int64
@@ -124,30 +134,33 @@ func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (
 			for _, p := range d.Values {
 				end, err := parseTimestamp(p.EndTime)
 				if err != nil || end.IsZero() || p.Value < 0 || p.Value > snapshotMaxMetric {
-					return AccountInsights{}, ErrMetricsUnavailable
+					return AccountInsights{}, refusal(out.RegainAfter)
 				}
 				out.Views = append(out.Views, DayViews{EndsAt: end, Value: p.Value})
 			}
 		case "clicks":
 			for _, l := range d.LinkTotals {
 				if l.Value < 0 || l.Value > snapshotMaxMetric {
-					return AccountInsights{}, ErrMetricsUnavailable
+					return AccountInsights{}, refusal(out.RegainAfter)
 				}
 				out.Clicks = append(out.Clicks, LinkClicks{URL: l.URL, Value: l.Value})
 			}
 		}
 	}
 	if len(out.Views) == 0 {
-		return AccountInsights{}, ErrMetricsUnavailable
+		return AccountInsights{}, refusal(out.RegainAfter)
 	}
 	return out, nil
 }
 
 // ReadAccountTotalsDay reads the account's likes, replies, reposts and quotes
-// over the one Pacific day. A response without all four is refused.
+// of the one Pacific day. The API totals every bucket whose end_time lies in
+// [since, until], both ends inclusive, and the bucket of a day ends at the
+// midnight that closes it, so the window is that midnight plus one hour. A
+// response without all four is refused.
 func (a *API) ReadAccountTotalsDay(ctx context.Context, day PacificDay) (DayTotals, error) {
 	var in insights
-	q := url.Values{"metric": {strings.Join(AccountTotalMetrics, ",")}, "since": {strconv.FormatInt(day.StartsAt.Unix(), 10)}, "until": {strconv.FormatInt(day.EndsAt.Unix(), 10)}}
+	q := url.Values{"metric": {strings.Join(AccountTotalMetrics, ",")}, "since": {strconv.FormatInt(day.EndsAt.Unix(), 10)}, "until": {strconv.FormatInt(day.EndsAt.Add(time.Hour).Unix(), 10)}}
 	header, err := a.doHeader(ctx, http.MethodGet, "/"+a.o.UserID+"/threads_insights", q, &in)
 	if err != nil {
 		return DayTotals{}, err
@@ -158,14 +171,23 @@ func (a *API) ReadAccountTotalsDay(ctx context.Context, day PacificDay) (DayTota
 			continue
 		}
 		if d.TotalValue == nil || d.TotalValue.Value < 0 || d.TotalValue.Value > snapshotMaxMetric {
-			return DayTotals{}, ErrMetricsUnavailable
+			return DayTotals{}, refusal(out.RegainAfter)
 		}
 		out.Totals[d.Name] = d.TotalValue.Value
 	}
 	if len(out.Totals) != len(AccountTotalMetrics) {
-		return DayTotals{}, ErrMetricsUnavailable
+		return DayTotals{}, refusal(out.RegainAfter)
 	}
 	return out, nil
+}
+
+// refusal is ErrMetricsUnavailable for a response the client cannot use. When
+// the usage header asked for a wait, it is a RateLimitedError carrying it.
+func refusal(wait time.Duration) error {
+	if wait > 0 {
+		return &RateLimitedError{Wait: wait, Err: ErrMetricsUnavailable}
+	}
+	return ErrMetricsUnavailable
 }
 
 // usageWait is the longest estimated_time_to_regain_access, in minutes, in the

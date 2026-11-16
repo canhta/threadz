@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -293,79 +294,224 @@ func (a *accountPoll) totalsSeries(n, gap int) []threads.PacificDay {
 	return days
 }
 
-func TestAccountTotalsPollBackfillsSixtyDaysRereadsTrailingDaysAndLeavesAGapNull(t *testing.T) {
+// dayReads records the Pacific date of every one-day totals read.
+func (a *accountPoll) dayReads() *[]string {
+	var days []string
+	a.source.Hook = func(_ context.Context, c threads.Call) error {
+		if c.Op == threads.OpReadAccountTotals {
+			days = append(days, c.Arg)
+		}
+		return nil
+	}
+	return &days
+}
+
+func TestAccountTotalsPollReadsTenDaysAPassAndBackfillsSixtyDays(t *testing.T) {
 	a := accountSetup(t)
-	days := a.totalsSeries(70, 5)
-	gap, newest := days[len(days)-5], days[len(days)-1]
-	reads := func() int { return a.source.Count(threads.OpReadAccountTotals) }
+	// Pacific noon, so the hourly passes of the backfill stay inside one day.
+	a.now = time.Date(2026, 11, 15, 20, 0, 0, 0, time.UTC)
+	days := a.totalsSeries(70, 0)
+	newest := days[len(days)-1]
+	reads := a.dayReads()
 
 	a.run()
-	// 70 days have views; the 60 newest are read, and the gap day, which the
-	// API gave no totals for, has no value rather than 0.
-	if reads() != 60 {
-		t.Fatalf("backfill reads = %d, want 60", reads())
+	if len(*reads) != 10 {
+		t.Fatalf("first pass made %d day reads, want the cap of 10", len(*reads))
 	}
-	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE metric='likes'`); n != 59 {
-		t.Fatalf("days with likes = %d, want 59", n)
+	// The 3 trailing days are read again by every pass; the rest of the cap
+	// takes the newest days still without totals, newest first.
+	if got, want := (*reads)[3], days[len(days)-4].Day; got != want {
+		t.Fatalf("fourth read = %s, want %s", got, want)
 	}
-	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE metric='quotes' AND value IS NULL`); n != 0 {
-		t.Fatalf("a missing day was stored as a value: %d", n)
+	for pass := 2; pass <= 20; pass++ {
+		*reads = nil
+		a.now = a.now.Add(time.Hour)
+		a.run()
+		if len(*reads) > 10 {
+			t.Fatalf("pass %d made %d day reads", pass, len(*reads))
+		}
+		if len(*reads) < 10 {
+			break
+		}
 	}
-	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE day='` + gap.Day + `' AND metric!='views'`); n != 0 {
-		t.Fatal("the gap day has a value")
+	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE metric='likes'`); n != 60 {
+		t.Fatalf("days with likes = %d, want the newest 60", n)
 	}
 	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE day='` + days[9].Day + `' AND metric!='views'`); n != 0 {
 		t.Fatal("a day beyond the newest 60 was read")
 	}
-	if n := a.count(`SELECT COUNT(*) FROM tool_calls WHERE tool='read_account_totals_day'`); n != 60 {
-		t.Fatalf("audited day reads = %d", n)
-	}
 
-	// The next read re-reads the 3 trailing days and retries the gap, nothing else.
+	// Once backfilled, a pass re-reads the 3 trailing days and nothing else.
+	*reads = nil
 	a.source.AccountTotals[newest.Day]["likes"] = 99
 	a.now = a.now.Add(time.Hour)
-	before := reads()
 	a.run()
-	if got := reads() - before; got != 4 {
-		t.Fatalf("second read made %d day reads, want 3 trailing and the gap", got)
+	if len(*reads) != 3 {
+		t.Fatalf("settled pass made %d day reads, want the 3 trailing", len(*reads))
 	}
 	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE day='` + newest.Day + `' AND metric='likes' AND value=99`); n != 1 {
 		t.Fatal("a trailing day was not replaced")
 	}
-	a.source.AccountTotals[gap.Day] = map[string]int64{"likes": 7, "replies": 0, "reposts": 0, "quotes": 0}
-	a.now = a.now.Add(time.Hour)
-	a.run()
-	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE day='` + gap.Day + `' AND metric='likes' AND value=7`); n != 1 {
-		t.Fatal("the gap day was not filled once the API had it")
+}
+
+func TestAccountTotalsPassRunsBeforeTheActionJobsAreClaimed(t *testing.T) {
+	a := accountSetup(t)
+	a.totalsSeries(3, 0)
+	posted := a.now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.st.DB().Exec(`INSERT INTO actions(id,agent_id,kind,text,dry_run,posted_at,thread_url,media_id) VALUES(1,'own','post','',0,?,'https://fixture.test/own/1','m1')`, posted); err != nil {
+		t.Fatal(err)
 	}
-	before = reads()
-	a.now = a.now.Add(time.Hour)
-	a.run()
-	if got := reads() - before; got != 3 {
-		t.Fatalf("third read made %d day reads, want the 3 trailing", got)
+	a.source.Actions["m1"] = threads.Metrics{Views: 10, Likes: 1}
+	claimed := func() int { return a.count(`SELECT COUNT(*) FROM metric_jobs WHERE claimed_at IS NOT NULL`) }
+	var claimedAtDayRead, claimedAtInsights, claimedAtActionRead []int
+	a.source.Hook = func(_ context.Context, c threads.Call) error {
+		switch c.Op {
+		case threads.OpReadAccountInsights:
+			claimedAtInsights = append(claimedAtInsights, claimed())
+		case threads.OpReadAccountTotals:
+			claimedAtDayRead = append(claimedAtDayRead, claimed())
+		case threads.OpReadActionMetrics:
+			claimedAtActionRead = append(claimedAtActionRead, claimed())
+		}
+		return nil
+	}
+	got := a.run()
+	if got.ClaimedJobs == 0 || got.AccountReads != 1 || got.Samples == 0 {
+		t.Fatalf("run = %+v", got)
+	}
+	if len(claimedAtInsights) != 1 || len(claimedAtDayRead) != 3 || len(claimedAtActionRead) != 1 {
+		t.Fatalf("reads: insights %v, days %v, actions %v", claimedAtInsights, claimedAtDayRead, claimedAtActionRead)
+	}
+	for _, n := range append(claimedAtInsights, claimedAtDayRead...) {
+		if n != 0 {
+			t.Fatalf("an account read ran with %d jobs already claimed", n)
+		}
+	}
+	if claimedAtActionRead[0] == 0 {
+		t.Fatal("the action read ran before its jobs were claimed")
 	}
 }
 
-func TestAccountTotalsPollWaitsOutUsageAndBacksOffOnFailure(t *testing.T) {
+func TestAccountTotalsPassReadsTheDaysItListedAcrossPacificMidnight(t *testing.T) {
+	a := accountSetup(t)
+	days := a.totalsSeries(3, 0)
+	var reads []string
+	a.source.Hook = func(_ context.Context, c threads.Call) error {
+		if c.Op == threads.OpReadAccountTotals {
+			reads = append(reads, c.Arg)
+			a.now = time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+		}
+		return nil
+	}
+	a.run()
+	want := []string{days[2].Day, days[1].Day, days[0].Day}
+	if !slices.Equal(reads, want) {
+		t.Fatalf("day reads = %v, want %v", reads, want)
+	}
+}
+
+func TestAccountTotalsRefusedDayIsTriedThreeTimesThenWaitsADay(t *testing.T) {
+	a := accountSetup(t)
+	days := a.totalsSeries(5, 5)
+	gap := days[0].Day
+	gapReads := func() int {
+		n := 0
+		for _, c := range a.source.Calls() {
+			if c.Op == threads.OpReadAccountTotals && c.Arg == gap {
+				n++
+			}
+		}
+		return n
+	}
+	for pass := 1; pass <= 3; pass++ {
+		if got := a.run(); got.AccountReads != 1 {
+			t.Fatalf("pass %d = %+v: a refused day is not a failure", pass, got)
+		}
+		if gapReads() != pass {
+			t.Fatalf("after pass %d the refused day was read %d times", pass, gapReads())
+		}
+		a.now = a.now.Add(time.Hour)
+	}
+	refusedAt := a.now.Add(-time.Hour)
+	a.run()
+	if gapReads() != 3 {
+		t.Fatalf("a day refused 3 times was read again after an hour: %d reads", gapReads())
+	}
+	a.now = refusedAt.Add(23 * time.Hour)
+	a.run()
+	if gapReads() != 3 {
+		t.Fatalf("a day refused 3 times was read again before 24 hours: %d reads", gapReads())
+	}
+	a.now = refusedAt.Add(24 * time.Hour)
+	a.source.AccountTotals[gap] = map[string]int64{"likes": 7, "replies": 0, "reposts": 0, "quotes": 0}
+	a.run()
+	if gapReads() != 4 {
+		t.Fatalf("the refused day was not retried after 24 hours: %d reads", gapReads())
+	}
+	if n := a.count(`SELECT COUNT(*) FROM account_daily WHERE day='` + gap + `' AND metric='likes' AND value=7`); n != 1 {
+		t.Fatal("the retried day was not stored")
+	}
+	a.now = a.now.Add(time.Hour)
+	a.run()
+	if gapReads() != 4 {
+		t.Fatalf("a stored day was read again: %d reads", gapReads())
+	}
+}
+
+func TestAccountTotalsUsageWaitOfAnyReadEndsThePass(t *testing.T) {
+	// The views read asks for a wait: no day is read, and the wait is kept.
 	a := accountSetup(t)
 	a.totalsSeries(5, 0)
 	a.source.Account.RegainAfter = 90 * time.Minute
-	got := a.run()
-	if got.AccountReads != 1 || a.source.Count(threads.OpReadAccountTotals) != 1 {
-		t.Fatalf("under a usage wait: %+v, %d day reads", got, a.source.Count(threads.OpReadAccountTotals))
+	reads := a.dayReads()
+	if got := a.run(); got.AccountReads != 1 || len(*reads) != 0 {
+		t.Fatalf("under a views usage wait: %+v, %d day reads", got, len(*reads))
 	}
 	if at := a.due(); !at.Equal(a.now.Add(90 * time.Minute)) {
 		t.Fatalf("next read due %s, want the usage wait", at)
 	}
-	a.now = a.now.Add(90 * time.Minute)
-	a.source.Account.RegainAfter = 0
-	a.run()
-	if n := a.count(`SELECT COUNT(DISTINCT day) FROM account_daily WHERE metric='likes'`); n != 5 {
-		t.Fatalf("days with likes = %d, want the remaining days read", n)
+
+	// A day read asks for a wait: that read is the last of the pass.
+	a = accountSetup(t)
+	a.totalsSeries(5, 0)
+	reads = a.dayReads()
+	hook := a.source.Hook
+	a.source.Hook = func(ctx context.Context, c threads.Call) error {
+		if c.Op == threads.OpReadAccountTotals {
+			a.source.Account.RegainAfter = 90 * time.Minute
+		}
+		return hook(ctx, c)
+	}
+	if got := a.run(); got.AccountReads != 1 || len(*reads) != 1 {
+		t.Fatalf("under a day usage wait: %+v, %d day reads", got, len(*reads))
+	}
+	if at := a.due(); !at.Equal(a.now.Add(90 * time.Minute)) {
+		t.Fatalf("next read due %s, want the usage wait", at)
 	}
 
+	// A refused day read asks for a wait: the pass ends there too.
+	a = accountSetup(t)
+	days := a.totalsSeries(5, 1)
+	reads = a.dayReads()
+	hook = a.source.Hook
+	a.source.Hook = func(ctx context.Context, c threads.Call) error {
+		if c.Op == threads.OpReadAccountTotals {
+			a.source.Account.RegainAfter = 90 * time.Minute
+		}
+		return hook(ctx, c)
+	}
+	if got := a.run(); got.AccountReads != 1 || len(*reads) != 1 || (*reads)[0] != days[4].Day {
+		t.Fatalf("under a usage wait of a refused day: %+v, reads %v", got, *reads)
+	}
+	if at := a.due(); !at.Equal(a.now.Add(90 * time.Minute)) {
+		t.Fatalf("next read due %s, want the usage wait", at)
+	}
+}
+
+func TestAccountTotalsFailedDayReadBacksTheNextReadOff(t *testing.T) {
+	a := accountSetup(t)
+	a.totalsSeries(5, 0)
 	a.source.Errors[threads.OpReadAccountTotals] = errors.New("synthetic failure")
-	a.now = a.now.Add(time.Hour)
 	before := a.source.Count(threads.OpReadAccountTotals)
 	if got := a.run(); got.AccountReads != 0 || a.source.Count(threads.OpReadAccountTotals)-before != 1 {
 		t.Fatalf("failing day read: %+v", got)

@@ -208,7 +208,7 @@ func (m *Memory) ReadAccountTotalsDay(ctx context.Context, day PacificDay) (DayT
 	}
 	totals, ok := m.AccountTotals[day.Day]
 	if !ok {
-		return DayTotals{}, ErrMetricsUnavailable
+		return DayTotals{}, refusal(m.Account.RegainAfter)
 	}
 	return DayTotals{PacificDay: day, Totals: totals, RegainAfter: m.Account.RegainAfter}, nil
 }

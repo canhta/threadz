@@ -30,8 +30,9 @@ const (
 	// 30 s replies read per action) after leaseOverhead. For n = 7 that is
 	// (1+7)*30 s + 45 s = 285 s < 300 s; n = 8 would need 315 s.
 	DefaultBatchSize = 7
-	// leaseOverhead is what runs between the claim and the read: opening the
-	// backend (30 s startup) and the account read (one 15 s request).
+	// leaseOverhead is the margin kept below the lease for what runs between
+	// the claim and the read: the follower lookup and the commit. The backend
+	// opens and the account pass runs before the claim.
 	leaseOverhead = 45 * time.Second
 
 	// RefreshCooldown is the shortest time between two refreshes of one action.
@@ -48,6 +49,13 @@ const (
 	// accountTotalsDays is how many of the newest days with views get their
 	// likes, replies, reposts and quotes.
 	accountTotalsDays = 60
+	// accountPassReads is the most one-day totals reads one pass makes; the
+	// days left wait for the next pass.
+	accountPassReads = 10
+	// accountRefusedTries is how many reads a day the API refuses gets before
+	// it waits accountRefusedWait.
+	accountRefusedTries = 3
+	accountRefusedWait  = 24 * time.Hour
 
 	accountSource     = "api"
 	reasonAccountRead = "account_insights_stored"
@@ -78,6 +86,14 @@ type Result struct {
 	// Skipped counts the actions a refresh request left out because they were refreshed less than RefreshCooldown ago.
 	Skipped int `json:"skipped"`
 }
+
+// refusedDay is a day the API returned no totals for: how many reads in a row
+// were refused, and when the next read may be made.
+type refusedDay struct {
+	tries     int
+	notBefore time.Time
+}
+
 type Processor struct {
 	mu   sync.Mutex
 	opts Options
@@ -86,6 +102,8 @@ type Processor struct {
 	accountLast     time.Time
 	accountBackoff  time.Time
 	accountFailures int
+	// accountRefused is what the API refused per Pacific date; accountMu guards it.
+	accountRefused map[string]refusedDay
 
 	// refreshLast is when each action was last refreshed; mu guards it.
 	refreshLast map[int64]time.Time
@@ -203,14 +221,46 @@ func (p *Processor) runDue(ctx context.Context, refresh []int64) (result Result,
 		}
 		p.emit(finalCtx, logging.Record{Event: logging.MetricsFinished, WakeID: wakeID, Outcome: outcome, Reason: endReason, Jobs: result.ClaimedJobs, Samples: result.Samples})
 	}()
+	if due, enabled := p.accountDue(p.opts.Now()); enabled && !due.After(p.opts.Now()) {
+		accountDue = true
+	}
+	// The source may bind its lifetime to this context. Keep it alive through
+	// cleanup; its own startup and each guarded read have tighter timeouts.
+	openCtx, cancel := context.WithTimeout(ctx, p.opts.LeaseDuration)
+	defer cancel()
+	backend, openErr := p.opts.ThreadsFactory(openCtx, p.opts.Template)
+	if errors.Is(openErr, context.Canceled) || errors.Is(openErr, context.DeadlineExceeded) {
+		return result, true, metricError("opening metric source", safeContextError(openErr))
+	}
+	var dispatcher *tools.Dispatcher
+	if openErr == nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			// Cleanup happens after the maintenance scope decided its samples.
+			// The backend logs its own close failure; it must not rewrite a
+			// completed scope or stop the scheduler.
+			_ = backend.Close(closeCtx)
+		}()
+		dispatcher, err = tools.NewDispatcher(tools.Options{Scope: guard.Scope{Store: p.opts.Store, Template: p.opts.Template, WakeID: wakeID, Now: p.opts.Now, Logger: p.opts.Logger, AllowLive: true}, Threads: backend, Owner: p.opts.Owner, Redactor: p.opts.Redactor, FetchTrends: p.opts.FetchTrends, SearchWeb: p.opts.SearchWeb})
+		if err != nil {
+			return result, true, metricError("configuring metric tools", err)
+		}
+	}
+	// The account pass runs before the claim so that its reads do not use up
+	// the lease of the action jobs.
+	if accountDue {
+		if openErr != nil {
+			p.accountFailed(p.opts.Now(), openErr)
+		} else if err := p.readAccount(ctx, dispatcher, wakeID, &result); err != nil {
+			return result, true, err
+		}
+	}
 	jobs, err := p.opts.Store.ClaimMetricJobs(ctx, p.opts.Template.ID, p.opts.Now(), p.opts.LeaseDuration, p.opts.BatchSize)
 	if err != nil {
 		return result, true, metricError("claiming metric targets", err)
 	}
 	result.ClaimedJobs = len(jobs)
-	if due, enabled := p.accountDue(p.opts.Now()); enabled && !due.After(p.opts.Now()) {
-		accountDue = true
-	}
 	if len(jobs) == 0 && !accountDue && len(refresh) == 0 {
 		return result, true, nil
 	}
@@ -235,18 +285,7 @@ func (p *Processor) runDue(ctx context.Context, refresh []int64) (result Result,
 			}
 		}
 	}()
-	// The source may bind its lifetime to this context. Keep it alive through
-	// cleanup; its own startup and each guarded read have tighter timeouts.
-	openCtx, cancel := context.WithTimeout(ctx, p.opts.LeaseDuration)
-	defer cancel()
-	backend, err := p.opts.ThreadsFactory(openCtx, p.opts.Template)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return result, true, metricError("opening metric source", safeContextError(err))
-		}
-		if accountDue {
-			p.accountFailed(p.opts.Now(), err)
-		}
+	if openErr != nil {
 		for _, group := range groups {
 			if e := p.deferJobs(ctx, wakeID, group, "source_unavailable", 0); e != nil {
 				return result, true, e
@@ -256,23 +295,6 @@ func (p *Processor) runDue(ctx context.Context, refresh []int64) (result Result,
 		}
 		endReason = "source_unavailable"
 		return result, true, nil
-	}
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		// Cleanup happens after the maintenance scope decided its samples.
-		// The backend logs its own close failure; it must not rewrite a
-		// completed scope or stop the scheduler.
-		_ = backend.Close(closeCtx)
-	}()
-	dispatcher, err := tools.NewDispatcher(tools.Options{Scope: guard.Scope{Store: p.opts.Store, Template: p.opts.Template, WakeID: wakeID, Now: p.opts.Now, Logger: p.opts.Logger, AllowLive: true}, Threads: backend, Owner: p.opts.Owner, Redactor: p.opts.Redactor, FetchTrends: p.opts.FetchTrends, SearchWeb: p.opts.SearchWeb})
-	if err != nil {
-		return result, true, metricError("configuring metric tools", err)
-	}
-	if accountDue {
-		if err := p.readAccount(ctx, dispatcher, wakeID, &result); err != nil {
-			return result, true, err
-		}
 	}
 	// Agent wakes read the follower count from the profile page and record it;
 	// a batch stamps the newest one rather than opening the browser again.

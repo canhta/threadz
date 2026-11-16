@@ -68,8 +68,14 @@ func (d *Dispatcher) browserRead(ctx context.Context, tool, operation string, a 
 		since, until := threads.AccountWindow(started, int(a.Int("days")))
 		return d.opts.Threads.ReadAccountInsights(ctx, since, until)
 	case threads.OpReadAccountTotals:
-		since, until := threads.AccountWindow(started, int(a.Int("days_ago")))
-		return d.opts.Threads.ReadAccountTotalsDay(ctx, threads.PacificDays(since, until)[0])
+		day, err := threads.ParsePacificDay(a.Text("day"))
+		if err != nil {
+			return nil, err
+		}
+		if day.EndsAt.After(started) {
+			return nil, fmt.Errorf("reading account totals: Pacific day %s has not closed", day.Day)
+		}
+		return d.opts.Threads.ReadAccountTotalsDay(ctx, day)
 	case threads.OpReadOwnMetrics:
 		if ids := a.IDList("action_ids"); len(ids) > 0 {
 			return d.actionMetrics(ctx, ids)

@@ -146,20 +146,23 @@ type GrowthPanel struct {
 	RepliesDelta   string
 	RepostsDelta   string
 	ViewsChart     *Chart
-	// HasInteractions is set when the account's interactions have a value in
-	// the range; Interactions is their sum.
-	HasInteractions   bool
-	Interactions      int64
-	InteractionsDelta string
-	InteractionsChart *Chart
-	Posts             []PostRow
-	Shown             int
-	Total             int
-	Top               []PostRow
-	LastMeasured      string
-	MeasuredAt        time.Time
-	Unmeasured        int
-	RangeLabel        string
+	// HasInteractions is set when a day of the range has views and all four
+	// interaction totals; Interactions is the sum over those days and
+	// InteractionsCounted their number. InteractionsDelta compares the days
+	// aligned in both periods and is empty when there are none.
+	HasInteractions     bool
+	Interactions        int64
+	InteractionsCounted int
+	InteractionsDelta   string
+	InteractionsChart   *Chart
+	Posts               []PostRow
+	Shown               int
+	Total               int
+	Top                 []PostRow
+	LastMeasured        string
+	MeasuredAt          time.Time
+	Unmeasured          int
+	RangeLabel          string
 }
 
 type TrendingPanel struct {
