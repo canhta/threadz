@@ -340,15 +340,16 @@ func (s *Store) CompleteMetricJobs(ctx context.Context, jobs []MetricJob, at tim
 }
 
 // settleMetricJobs ends the remaining jobs of the action with reason settled
-// when a sample at or after the settle window differs from the one before it by
-// less than settleViewsPercent of its views and by nothing in likes and replies.
+// when a sample at or after the settle window differs from the sample of the
+// action's previous scheduled job (never a refresh sample) by less than
+// settleViewsPercent of its views and by nothing in likes and replies.
 func settleMetricJobs(ctx context.Context, conn *sql.Conn, jobs []MetricJob, measured string, values MetricValues) error {
 	if !slices.ContainsFunc(jobs, func(j MetricJob) bool { return j.WindowMinutes >= settleAfterMinutes }) {
 		return nil
 	}
 	first := jobs[0]
 	var views, likes, replies int64
-	err := conn.QueryRowContext(ctx, `SELECT views,likes,replies FROM metrics WHERE action_id=? AND measured_at<? ORDER BY measured_at DESC LIMIT 1`, first.ActionID, measured).Scan(&views, &likes, &replies)
+	err := conn.QueryRowContext(ctx, `SELECT views,likes,replies FROM metrics WHERE action_id=? AND measured_at IN (SELECT completed_at FROM metric_jobs WHERE agent_id=? AND action_id=? AND completed_at<?) ORDER BY measured_at DESC LIMIT 1`, first.ActionID, first.AgentID, first.ActionID, measured).Scan(&views, &likes, &replies)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

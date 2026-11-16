@@ -12,22 +12,19 @@ func v(n int64) *int64 { return &n }
 
 type dailyRow struct {
 	value   *int64
-	settled bool
 	fetched string
 }
 
 func readDaily(t *testing.T, s *store.Store, day string) dailyRow {
 	t.Helper()
 	var r dailyRow
-	var settled int
-	if err := s.DB().QueryRow(`SELECT value,settled,fetched_at FROM account_daily WHERE agent_id='a' AND day=? AND metric='views'`, day).Scan(&r.value, &settled, &r.fetched); err != nil {
+	if err := s.DB().QueryRow(`SELECT value,fetched_at FROM account_daily WHERE agent_id='a' AND day=? AND metric='views'`, day).Scan(&r.value, &r.fetched); err != nil {
 		t.Fatalf("reading %s: %v", day, err)
 	}
-	r.settled = settled == 1
 	return r
 }
 
-func TestAccountDailyUpsertSettledAndNull(t *testing.T) {
+func TestAccountDailyUpsertRewritesAndKeepsNull(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, ":memory:")
 	if err != nil {
@@ -42,13 +39,13 @@ func TestAccountDailyUpsertSettledAndNull(t *testing.T) {
 	if err = s.UpsertAccountDays(ctx, "a", "views", []store.AccountDay{day(nil)}, ends.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if got := readDaily(t, s, "2026-11-14"); got.value != nil || got.settled {
+	if got := readDaily(t, s, "2026-11-14"); got.value != nil {
 		t.Fatalf("missing day = %+v, want NULL and unsettled, never 0", got)
 	}
 	if err = s.UpsertAccountDays(ctx, "a", "views", []store.AccountDay{day(v(100))}, ends.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if got := readDaily(t, s, "2026-11-14"); got.value == nil || *got.value != 100 || got.settled {
+	if got := readDaily(t, s, "2026-11-14"); got.value == nil || *got.value != 100 {
 		t.Fatalf("first value = %+v", got)
 	}
 	// A revision inside the trailing window replaces the value; a missing read keeps it.
@@ -59,21 +56,19 @@ func TestAccountDailyUpsertSettledAndNull(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readDaily(t, s, "2026-11-14")
-	if got.value == nil || *got.value != 120 || got.settled {
-		t.Fatalf("after revision and a missing read = %+v, want 120 unsettled", got)
+	if got.value == nil || *got.value != 120 {
+		t.Fatalf("after revision and a missing read = %+v, want 120", got)
 	}
-	// Read 3 days after the day closed: it settles, and later reads leave it alone.
-	if err = s.UpsertAccountDays(ctx, "a", "views", []store.AccountDay{day(v(125))}, ends.Add(72*time.Hour)); err != nil {
+	// A day is rewritten by every read of it, however old; the table has no settled state.
+	if err = s.UpsertAccountDays(ctx, "a", "views", []store.AccountDay{day(v(125))}, ends.Add(96*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if got = readDaily(t, s, "2026-11-14"); *got.value != 125 || !got.settled {
-		t.Fatalf("after 3 days = %+v, want 125 settled", got)
+	if got = readDaily(t, s, "2026-11-14"); *got.value != 125 || got.fetched != "2026-11-19T08:00:00Z" {
+		t.Fatalf("a later read = %+v, want 125 fetched at the read", got)
 	}
-	if err = s.UpsertAccountDays(ctx, "a", "views", []store.AccountDay{day(v(999))}, ends.Add(96*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if got = readDaily(t, s, "2026-11-14"); *got.value != 125 || got.fetched != "2026-11-18T08:00:00Z" {
-		t.Fatalf("settled day rewritten: %+v", got)
+	var column int
+	if err = s.DB().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('account_daily') WHERE name='settled'`).Scan(&column); err != nil || column != 0 {
+		t.Fatalf("account_daily has a settled column: %d, %v", column, err)
 	}
 	if n, err := s.AccountDailyCount(ctx, "a"); err != nil || n != 1 {
 		t.Fatalf("count = %d, %v", n, err)
@@ -128,13 +123,16 @@ func TestAccountSampleSkipsEqualPreviousReading(t *testing.T) {
 	}
 }
 
-func TestAccountReconciliationAttributesOwnActionGrowth(t *testing.T) {
+func TestDashboardSnapshotAttributesOwnActionGrowthToPacificDays(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if err = s.EnsureAgent(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
 	ends := time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC) // closes Pacific day 2026-11-14
 	if err = s.UpsertAccountDays(ctx, "a", "views", []store.AccountDay{
 		{Day: "2026-11-13", StartsAt: ends.Add(-48 * time.Hour), EndsAt: ends.Add(-24 * time.Hour), Value: v(1000)},
@@ -155,29 +153,15 @@ func TestAccountReconciliationAttributesOwnActionGrowth(t *testing.T) {
 	} {
 		exec(t, s, `INSERT INTO metrics(agent_id,action_id,measured_at,views) VALUES('a',?,?,?)`, m.action, m.at, m.views)
 	}
-	type row struct {
-		day        string
-		views      *int64
-		attributed int64
-		residual   *int64
-	}
-	rows, err := s.DB().Query(`SELECT day,account_views,attributed,residual FROM account_reconciliation WHERE agent_id='a' ORDER BY day`)
+	snap, err := s.DashboardSnapshot(ctx, store.DashboardQuery{AgentID: "a", From: ends.Add(-72 * time.Hour), Now: ends.Add(48 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	var got []row
-	for rows.Next() {
-		var r row
-		if err = rows.Scan(&r.day, &r.views, &r.attributed, &r.residual); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, r)
-	}
 	// Day 13: action 1 grew 0 to 30. Day 14: action 1 30 to 80, action 2 0 to 70; the dry run counts for
-	// nothing. Day 15 has no account value, so no residual; the later sample of action 1 lands there.
-	if len(got) != 3 || got[0].attributed != 30 || *got[0].residual != 970 || got[1].attributed != 120 || *got[1].residual != 1880 || got[2].views != nil || got[2].residual != nil || got[2].attributed != 420 {
-		t.Fatalf("reconciliation = %+v", got)
+	// nothing. Day 15 has no account value; the later sample of action 1 lands there.
+	got := snap.AccountDays
+	if len(got) != 3 || got[2].Day != "2026-11-13" || got[2].Attributed != 30 || got[1].Attributed != 120 || got[0].Day != "2026-11-15" || got[0].Views != nil || got[0].Attributed != 420 {
+		t.Fatalf("account days = %+v", got)
 	}
 }
 

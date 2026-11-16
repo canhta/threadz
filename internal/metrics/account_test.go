@@ -259,10 +259,20 @@ func TestAccountPollIsOffWithoutTheAPIBackend(t *testing.T) {
 
 func TestAccountPollStoreFailureBacksOffAndIsReported(t *testing.T) {
 	a := accountSetup(t)
-	if _, err := a.st.DB().Exec(`DROP VIEW account_reconciliation; DROP TABLE account_daily`); err != nil {
+	if _, err := a.st.DB().Exec(`DROP TABLE account_daily`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.p.RunDue(context.Background()); err == nil {
 		t.Fatal("a failed store write was not reported")
+	}
+}
+
+func TestAccountPollWithoutDueActionsReadsNoActionMetrics(t *testing.T) {
+	a := accountSetup(t)
+	if got := a.run(); got.AccountReads != 1 || got.ClaimedJobs != 0 {
+		t.Fatalf("run = %+v", got)
+	}
+	if n, f := a.source.Count(threads.OpReadActionMetrics), a.source.Count(threads.OpReadOwnMetrics); n != 0 || f != 0 {
+		t.Fatalf("a run with no action due made %d action reads and %d follower reads", n, f)
 	}
 }

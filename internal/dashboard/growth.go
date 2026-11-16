@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/canhta/threadz/internal/config"
 	"github.com/canhta/threadz/internal/store"
+	"github.com/canhta/threadz/internal/threads"
 	"math"
 	"sort"
 	"time"
@@ -11,11 +12,13 @@ import (
 
 // accountSeries is the account's daily views by Pacific date and, for each of
 // those days, the views the agent's own actions gained. A day the account has
-// no value for is absent, never 0. A dashboard day is matched to the Pacific
-// date with the same calendar date, so a schedule zone far from Pacific time
-// shifts the totals by up to a day.
+// no value for is absent, never 0. A chart day is matched to the Pacific date
+// with the same calendar date, so a schedule zone far from Pacific time shifts
+// a chart point by up to a day; the headline range is in Pacific days.
 type accountSeries struct {
 	views, attributed map[string]int64
+	// days holds the dates that have a value, newest first.
+	days []string
 }
 
 func accountFrom(days []store.DashboardAccountDay) accountSeries {
@@ -23,9 +26,26 @@ func accountFrom(days []store.DashboardAccountDay) accountSeries {
 	for _, d := range days {
 		if d.Views != nil {
 			a.views[d.Day], a.attributed[d.Day] = *d.Views, d.Attributed
+			a.days = append(a.days, d.Day)
 		}
 	}
+	sort.Sort(sort.Reverse(sort.StringSlice(a.days)))
 	return a
+}
+
+// rangeStart is the first of the n Pacific days that end the headline range:
+// the newest day with a value that has closed at now. Today's Pacific day and
+// a closed day not read yet are not in it.
+func (a accountSeries) rangeStart(n int, now time.Time) (time.Time, bool) {
+	since, until := threads.AccountWindow(now, 1)
+	closed := threads.PacificDays(since, until)[0].Day
+	for _, day := range a.days {
+		if day <= closed {
+			end, err := time.Parse("2006-01-02", day)
+			return end.AddDate(0, 0, 1-n), err == nil
+		}
+	}
+	return time.Time{}, false
 }
 
 // total sums the days from from up to but excluding to; ok is false when none

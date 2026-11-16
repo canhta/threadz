@@ -3,6 +3,7 @@ package dashboard_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/canhta/threadz/internal/store"
 )
@@ -79,5 +80,36 @@ func TestAccountViewsWithoutAPriorPeriodOrAnyViews(t *testing.T) {
 	page = mustPage(t, newHandler(newSource(s)))
 	if page.Growth.HasViews || page.KPIs[0].Value != "—" {
 		t.Fatalf("only missing days must show no figure: %+v", page.KPIs[0])
+	}
+}
+
+// flatAccountDays is 100 views a day from newest back through 14 days.
+func flatAccountDays(newest string) []store.DashboardAccountDay {
+	end, _ := time.Parse("2006-01-02", newest)
+	var days []store.DashboardAccountDay
+	for i := range 14 {
+		days = append(days, accountDay(end.AddDate(0, 0, -i).Format("2006-01-02"), n64(100), 10))
+	}
+	return days
+}
+
+func TestAccountViewsRangeIsTheLastCompletedPacificDays(t *testing.T) {
+	s := measured()
+	// Today is 2026-11-12 and has no bucket: a flat series must read flat, 7 days against 7.
+	s.AccountDays = flatAccountDays("2026-11-11")
+	g := mustPage(t, newHandler(newSource(s))).Growth
+	if g.Views != 700 || g.ViewsDelta != "same as the previous 7 days" {
+		t.Fatalf("flat series: views %d delta %q, want 700 and the same as the previous 7 days", g.Views, g.ViewsDelta)
+	}
+	// The newest closed day is not read yet: the range ends at the newest day that has a bucket.
+	s.AccountDays = flatAccountDays("2026-11-10")
+	g = mustPage(t, newHandler(newSource(s))).Growth
+	if g.Views != 700 || g.ViewsDelta != "same as the previous 7 days" {
+		t.Fatalf("series one day behind: views %d delta %q", g.Views, g.ViewsDelta)
+	}
+	// A bucket for a day that has not closed in Pacific time is not counted.
+	s.AccountDays = append([]store.DashboardAccountDay{accountDay("2026-11-12", n64(5000), 0)}, flatAccountDays("2026-11-11")...)
+	if g = mustPage(t, newHandler(newSource(s))).Growth; g.Views != 700 {
+		t.Fatalf("today's bucket counted: views %d", g.Views)
 	}
 }

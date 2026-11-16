@@ -264,3 +264,89 @@ func TestBatchReadRefreshWithoutIDsCoversEveryYoungAction(t *testing.T) {
 		t.Fatalf("second refresh = %+v, %v", got, err)
 	}
 }
+
+func TestBatchReadRequestTimeoutCountsAnAttemptWhileCancellationDoesNot(t *testing.T) {
+	r := newBatchRig(t, 2)
+	r.source.ActionErrors = map[string]error{"m1": context.DeadlineExceeded}
+	r.at(15 * time.Minute)
+	got := r.runDue()
+	if got.Samples != 1 || got.DeferredJobs != 1 {
+		t.Fatalf("result = %+v, want the other action sampled and one deferral", got)
+	}
+	if n := r.count(`SELECT attempts FROM metric_jobs WHERE action_id=1 AND window_minutes=15 AND reason='read_failed'`); n != 1 {
+		t.Fatalf("attempts of the timed-out action = %d, want 1", n)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.source.Hook = func(_ context.Context, c threads.Call) error {
+		if c.Op == threads.OpReadActionMetrics {
+			cancel()
+		}
+		return nil
+	}
+	r.at(25 * time.Minute)
+	before := r.count(`SELECT SUM(attempts) FROM metric_jobs`)
+	if _, err := r.p.RunDue(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled parent: err = %v, want context.Canceled", err)
+	}
+	if n := r.count(`SELECT SUM(attempts) FROM metric_jobs`); n != before {
+		t.Fatalf("a cancel counted %d attempts", n-before)
+	}
+}
+
+func TestBatchReadWaitTheAPIAskedForDelaysTheRetry(t *testing.T) {
+	r := newBatchRig(t, 2)
+	r.source.ActionErrors = map[string]error{"m1": &threads.RateLimitedError{Wait: 30 * time.Minute, Err: threads.ErrAPI}}
+	r.at(15 * time.Minute)
+	got := r.runDue()
+	if got.Samples != 1 || got.DeferredJobs != 1 {
+		t.Fatalf("result = %+v", got)
+	}
+	var reason, notBefore string
+	var attempts int
+	if err := r.st.DB().QueryRow(`SELECT reason,attempts,not_before FROM metric_jobs WHERE action_id=1 AND window_minutes=15`).Scan(&reason, &attempts, &notBefore); err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, notBefore)
+	if want := r.now.Add(30 * time.Minute); err != nil || reason != "source_unavailable" || attempts != 0 || !at.Equal(want) {
+		t.Fatalf("deferral = %q attempts %d not_before %s; want source_unavailable, 0, %s", reason, attempts, notBefore, want)
+	}
+}
+
+func TestRefreshWhileTheMetricWakeIsBusyKeepsTheRequestRetryable(t *testing.T) {
+	ctx := context.Background()
+	r := newBatchRig(t, 1)
+	r.at(10 * time.Minute)
+	if _, err := r.st.DB().Exec(`INSERT INTO wakes(agent_id,started_at,kind) VALUES('own',?,'agent')`, r.now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.p.Refresh(ctx, []int64{1})
+	if err != nil || got.Refreshed != 0 || got.Skipped != 0 || r.source.Count(threads.OpReadActionMetrics) != 0 {
+		t.Fatalf("refresh during an agent wake = %+v, %v", got, err)
+	}
+	if _, err = r.st.DB().Exec(`UPDATE wakes SET ended_at=started_at`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = r.p.Refresh(ctx, []int64{1}); err != nil || got.Refreshed != 1 || got.Skipped != 0 {
+		t.Fatalf("retry after the wake = %+v, %v; want it refreshed, not skipped", got, err)
+	}
+}
+
+func TestRefreshOutcomeIsExactAgainstAConcurrentRunDue(t *testing.T) {
+	for range 100 {
+		r := newBatchRig(t, 2)
+		r.at(10 * time.Minute)
+		done := make(chan error, 1)
+		go func() {
+			_, err := r.p.RunDue(context.Background())
+			done <- err
+		}()
+		got, err := r.p.Refresh(context.Background(), nil)
+		if err != nil || got.Refreshed != 2 {
+			t.Fatalf("refresh = %+v, %v; want both actions counted whichever run took them", got, err)
+		}
+		if err = <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

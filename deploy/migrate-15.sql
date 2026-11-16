@@ -2,8 +2,8 @@
 -- the database:  sqlite3 -bail threadz.db < migrate-15.sql
 -- -bail is required: it stops the script at the first error. The file refuses
 -- to run on any other schema version and is one transaction: it applies
--- completely or not at all. It adds the account insights tables and the
--- account_reconciliation view, adds account_followers.source, and rebuilds
+-- completely or not at all. It adds the account insights tables, adds
+-- account_followers.source, and rebuilds
 -- metric_jobs with window_minutes (the old window_hours times 60), the new
 -- offset list and the settled reason; every job and sample is kept. The first run of
 -- the new binary backfills account_daily from the API and seeds the new offsets.
@@ -38,23 +38,10 @@ CREATE TABLE account_daily (
     day TEXT NOT NULL,
     metric TEXT NOT NULL,
     value INTEGER CHECK (value IS NULL OR value >= 0),
-    settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1)),
     fetched_at TEXT NOT NULL,
     starts_at TEXT NOT NULL,
     ends_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, day, metric)
-);
-
-CREATE VIEW account_reconciliation AS
-SELECT agent_id, day, account_views, attributed, account_views - attributed AS residual
-FROM (
-    SELECT d.agent_id AS agent_id, d.day AS day, d.value AS account_views,
-           COALESCE((SELECT SUM(MAX(0,
-                  COALESCE((SELECT m.views FROM metrics m WHERE m.action_id = x.id AND julianday(m.measured_at) <= julianday(d.ends_at) ORDER BY julianday(m.measured_at) DESC LIMIT 1), 0)
-                - COALESCE((SELECT m.views FROM metrics m WHERE m.action_id = x.id AND julianday(m.measured_at) < julianday(d.starts_at) ORDER BY julianday(m.measured_at) DESC LIMIT 1), 0)))
-                FROM actions x WHERE x.agent_id = d.agent_id AND x.dry_run = 0), 0) AS attributed
-    FROM account_daily d
-    WHERE d.metric = 'views'
 );
 
 ALTER TABLE metric_jobs RENAME TO metric_jobs_v13;

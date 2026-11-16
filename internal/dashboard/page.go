@@ -731,9 +731,10 @@ func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Tim
 		return []*float64{&v}, []string{formatCount(views)}
 	}, func(v float64) string { return formatValue(v) }, a.Location, 10)
 
-	if views, own, ok := acct.total(currentStart, currentStart.AddDate(0, 0, days)); ok {
+	if start, ok := acct.rangeStart(days, now); ok {
+		views, own, _ := acct.total(start, start.AddDate(0, 0, days))
 		g.HasViews, g.Views = true, views
-		if prior, _, ok := acct.total(priorStart, currentStart); ok {
+		if prior, _, ok := acct.total(start.AddDate(0, 0, -days), start); ok {
 			if text, ok := countDelta(views, prior, countText(days, "day", "days")); ok {
 				g.ViewsDelta = text
 			}

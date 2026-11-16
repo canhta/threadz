@@ -24,15 +24,22 @@ import (
 const (
 	DefaultLeaseDuration = 5 * time.Minute
 	DefaultRetryDelay    = 5 * time.Minute
-	DefaultBatchSize     = 100
+	// DefaultBatchSize is the most action groups one run reads so that the
+	// worst case stays inside DefaultLeaseDuration: the read takes at most
+	// tools.MetricReadBudget(n) (one 30 s insights call per 25 actions, then a
+	// 30 s replies read per action) after leaseOverhead. For n = 7 that is
+	// (1+7)*30 s + 45 s = 285 s < 300 s; n = 8 would need 315 s.
+	DefaultBatchSize = 7
+	// leaseOverhead is what runs between the claim and the read: opening the
+	// backend (30 s startup) and the account read (one 15 s request).
+	leaseOverhead = 45 * time.Second
 
 	// RefreshCooldown is the shortest time between two refreshes of one action.
 	RefreshCooldown = time.Minute
 	// refreshAge is how young an action is to be refreshed on request.
 	refreshAge = 24 * time.Hour
 
-	// AccountPollEvery is the period of the account insights read: the series
-	// only changes when a Pacific day closes, so a shorter period gains nothing.
+	// AccountPollEvery is the period of the account insights read.
 	AccountPollEvery = time.Hour
 	// accountCloseDelay is how long after a Pacific midnight the closing read is made.
 	accountCloseDelay = 5 * time.Minute
@@ -77,9 +84,8 @@ type Processor struct {
 	accountBackoff  time.Time
 	accountFailures int
 
-	refreshMu    sync.Mutex
-	refreshLast  map[int64]time.Time
-	refreshQueue []int64
+	// refreshLast is when each action was last refreshed; mu guards it.
+	refreshLast map[int64]time.Time
 }
 
 func New(opts Options) (*Processor, error) {
@@ -140,31 +146,38 @@ func (p *Processor) NextDue(ctx context.Context) (time.Time, bool, error) {
 // RunDue leases at most BatchSize action groups. Each group has one guarded
 // current read, one actual-timestamp sample and all its ready targets completed
 // atomically. Missing/failed reads are deferred without manufacturing zeros.
-func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
+func (p *Processor) RunDue(ctx context.Context) (Result, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	result, _, err := p.runDue(ctx, nil)
+	return result, err
+}
+
+// runDue is RunDue with the refresh requests to serve; the caller holds p.mu.
+// ran reports whether a metric wake opened, so a read was attempted.
+func (p *Processor) runDue(ctx context.Context, refresh []int64) (result Result, ran bool, runErr error) {
 	due, ok, err := p.NextDue(ctx)
 	if err != nil {
-		return result, err
+		return result, false, err
 	}
-	refresh := p.takeRefresh()
 	if len(refresh) == 0 && (!ok || due.After(p.opts.Now())) {
-		return result, nil
+		return result, false, nil
 	}
 	available, err := p.available(ctx)
 	if err != nil {
-		return result, metricError("checking metric wake", err)
+		return result, false, metricError("checking metric wake", err)
 	}
 	if !available {
-		return result, nil
+		return result, false, nil
 	}
 	wakeID, err := p.opts.Store.BeginMetricWake(ctx, p.opts.Template.ID, p.opts.Now())
 	if err != nil {
 		if ready, e := p.available(ctx); e == nil && !ready {
-			return result, nil
+			return result, false, nil
 		}
-		return result, metricError("starting metric wake", err)
+		return result, false, metricError("starting metric wake", err)
 	}
+	ran = true
 	endReason := "completed"
 	accountDue := false
 	defer func() {
@@ -189,14 +202,14 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	}()
 	jobs, err := p.opts.Store.ClaimMetricJobs(ctx, p.opts.Template.ID, p.opts.Now(), p.opts.LeaseDuration, p.opts.BatchSize)
 	if err != nil {
-		return result, metricError("claiming metric targets", err)
+		return result, true, metricError("claiming metric targets", err)
 	}
 	result.ClaimedJobs = len(jobs)
 	if due, enabled := p.accountDue(p.opts.Now()); enabled && !due.After(p.opts.Now()) {
 		accountDue = true
 	}
 	if len(jobs) == 0 && !accountDue && len(refresh) == 0 {
-		return result, nil
+		return result, true, nil
 	}
 	groups := groupJobs(jobs)
 	// Every early exit releases unprocessed claims under a bounded cleanup context.
@@ -212,7 +225,7 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 			reason = "cancelled"
 		}
 		for _, group := range pending {
-			if err := p.deferJobs(finalCtx, wakeID, group, reason); err != nil {
+			if err := p.deferJobs(finalCtx, wakeID, group, reason, 0); err != nil {
 				runErr = errors.Join(runErr, err)
 			} else {
 				result.DeferredJobs += len(group)
@@ -226,20 +239,20 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	backend, err := p.opts.ThreadsFactory(openCtx, p.opts.Template)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return result, metricError("opening metric source", safeContextError(err))
+			return result, true, metricError("opening metric source", safeContextError(err))
 		}
 		if accountDue {
 			p.accountFailed(p.opts.Now(), err)
 		}
 		for _, group := range groups {
-			if e := p.deferJobs(ctx, wakeID, group, "source_unavailable"); e != nil {
-				return result, e
+			if e := p.deferJobs(ctx, wakeID, group, "source_unavailable", 0); e != nil {
+				return result, true, e
 			}
 			result.DeferredJobs += len(group)
 			pending = pending[1:]
 		}
 		endReason = "source_unavailable"
-		return result, nil
+		return result, true, nil
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -251,18 +264,18 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	}()
 	dispatcher, err := tools.NewDispatcher(tools.Options{Scope: guard.Scope{Store: p.opts.Store, Template: p.opts.Template, WakeID: wakeID, Now: p.opts.Now, Logger: p.opts.Logger, AllowLive: true}, Threads: backend, Owner: p.opts.Owner, Redactor: p.opts.Redactor, FetchTrends: p.opts.FetchTrends, SearchWeb: p.opts.SearchWeb})
 	if err != nil {
-		return result, metricError("configuring metric tools", err)
+		return result, true, metricError("configuring metric tools", err)
 	}
 	if accountDue {
 		if err := p.readAccount(ctx, dispatcher, wakeID, &result); err != nil {
-			return result, err
+			return result, true, err
 		}
 	}
 	// Agent wakes read the follower count from the profile page and record it;
 	// a batch stamps the newest one rather than opening the browser again.
 	var followers *int64
 	if n, ok, err := p.opts.Store.LatestFollowers(ctx, p.opts.Template.ID); err != nil {
-		return result, metricError("reading recorded followers", err)
+		return result, true, metricError("reading recorded followers", err)
 	} else if ok {
 		followers = &n
 	}
@@ -279,13 +292,17 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 			sampleOnly = append(sampleOnly, id)
 		}
 	}
-	items, batchErr := p.readBatch(ctx, dispatcher, wakeID, ids)
+	var items map[int64]tools.ActionMetrics
+	var batchErr error
+	if len(ids) > 0 {
+		items, batchErr = p.readBatch(ctx, dispatcher, wakeID, ids)
+	}
 	if errors.Is(batchErr, context.Canceled) || errors.Is(batchErr, context.DeadlineExceeded) || errors.Is(batchErr, guard.ErrAudit) {
-		return result, metricError("reading guarded metrics", batchErr)
+		return result, true, metricError("reading guarded metrics", batchErr)
 	}
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			return result, true, err
 		}
 		first := group[0]
 		item, found := items[first.ActionID]
@@ -300,7 +317,7 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 		case reason == tools.FailureNotFound:
 			if p.gone(ctx, backend, first.ActionID) {
 				if e := p.opts.Store.EndGoneMetricJobs(ctx, group, p.opts.Now()); e != nil {
-					return result, metricError("ending metric targets", e)
+					return result, true, metricError("ending metric targets", e)
 				}
 				pending = pending[1:]
 				continue
@@ -308,8 +325,8 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 			reason = tools.FailureRead
 		}
 		if reason != "" {
-			if e := p.deferJobs(ctx, wakeID, group, reason); e != nil {
-				return result, e
+			if e := p.deferJobs(ctx, wakeID, group, reason, time.Duration(item.RetryAfterSeconds)*time.Second); e != nil {
+				return result, true, e
 			}
 			result.DeferredJobs += len(group)
 			pending = pending[1:]
@@ -324,14 +341,14 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 			// recoverable at lease expiry; other DB errors get a future retry if possible.
 			if errors.Is(e, store.ErrMetricClaim) {
 				pending = pending[1:]
-				return result, metricError("committing metric sample", e)
+				return result, true, metricError("committing metric sample", e)
 			}
-			if deferErr := p.deferJobs(context.WithoutCancel(ctx), wakeID, group, "persistence_failed"); deferErr != nil {
-				return result, errors.Join(metricError("committing metric sample", e), deferErr)
+			if deferErr := p.deferJobs(context.WithoutCancel(ctx), wakeID, group, "persistence_failed", 0); deferErr != nil {
+				return result, true, errors.Join(metricError("committing metric sample", e), deferErr)
 			}
 			result.DeferredJobs += len(group)
 			pending = pending[1:]
-			return result, metricError("committing metric sample", e)
+			return result, true, metricError("committing metric sample", e)
 		}
 		pending = pending[1:]
 		if committed {
@@ -355,11 +372,11 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 		}
 		values := item.Metrics
 		if e := p.opts.Store.RecordMetricSample(ctx, p.opts.Template.ID, id, p.opts.Now(), store.MetricValues{Views: values.Views, Likes: values.Likes, Replies: values.Replies, Reposts: values.Reposts, Quotes: values.Quotes, Shares: values.Shares, Followers: followers, AuthorReplied: item.AuthorReplied}); e != nil {
-			return result, metricError("recording refreshed sample", e)
+			return result, true, metricError("recording refreshed sample", e)
 		}
 		result.Refreshed++
 	}
-	return result, nil
+	return result, true, nil
 }
 
 // errBinding means the guarded read answered with something other than the
@@ -408,7 +425,8 @@ func (p *Processor) Refresh(ctx context.Context, actionIDs []int64) (Result, err
 	if err != nil {
 		return Result{}, metricError("reading young actions", err)
 	}
-	p.refreshMu.Lock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.refreshLast == nil {
 		p.refreshLast = map[int64]time.Time{}
 	}
@@ -417,31 +435,26 @@ func (p *Processor) Refresh(ctx context.Context, actionIDs []int64) (Result, err
 			delete(p.refreshLast, id)
 		}
 	}
+	var ids []int64
 	skipped := 0
 	for _, id := range young {
 		if _, cooling := p.refreshLast[id]; cooling {
 			skipped++
 			continue
 		}
-		p.refreshLast[id] = now
-		p.refreshQueue = append(p.refreshQueue, id)
+		ids = append(ids, id)
 	}
-	queued := len(p.refreshQueue)
-	p.refreshMu.Unlock()
-	if queued == 0 {
+	if len(ids) == 0 {
 		return Result{Skipped: skipped}, nil
 	}
-	result, err := p.RunDue(ctx)
+	result, ran, err := p.runDue(ctx, ids)
+	if ran {
+		for _, id := range ids {
+			p.refreshLast[id] = now
+		}
+	}
 	result.Skipped = skipped
 	return result, err
-}
-
-func (p *Processor) takeRefresh() []int64 {
-	p.refreshMu.Lock()
-	defer p.refreshMu.Unlock()
-	ids := p.refreshQueue
-	p.refreshQueue = nil
-	return ids
 }
 
 func (p *Processor) available(ctx context.Context) (bool, error) {
@@ -484,8 +497,9 @@ func (p *Processor) gone(ctx context.Context, backend threads.Backend, actionID 
 	return true
 }
 
-// deferJobs retries after RetryDelay doubled for each earlier counted attempt.
-func (p *Processor) deferJobs(ctx context.Context, wakeID int64, jobs []store.MetricJob, reason string) error {
+// deferJobs retries after RetryDelay doubled for each earlier counted attempt,
+// or after wait when the source asked for longer.
+func (p *Processor) deferJobs(ctx context.Context, wakeID int64, jobs []store.MetricJob, reason string, wait time.Duration) error {
 	finalCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	now := p.opts.Now()
@@ -493,7 +507,7 @@ func (p *Processor) deferJobs(ctx context.Context, wakeID int64, jobs []store.Me
 	for _, job := range jobs {
 		attempts = max(attempts, job.Attempts)
 	}
-	if err := p.opts.Store.DeferMetricJobs(finalCtx, jobs, now, now.Add(p.opts.RetryDelay<<min(attempts, store.MaxMetricAttempts)), reason); err != nil {
+	if err := p.opts.Store.DeferMetricJobs(finalCtx, jobs, now, now.Add(max(wait, p.opts.RetryDelay<<min(attempts, store.MaxMetricAttempts))), reason); err != nil {
 		return metricError("deferring metric targets", err)
 	}
 	for _, job := range jobs {

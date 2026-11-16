@@ -92,7 +92,8 @@ func (a *API) do(ctx context.Context, method, path string, q url.Values, out any
 }
 
 // doHeader is do that also returns the response headers, which carry the usage
-// the API reports on every response, failed ones included.
+// the API reports on every response. A failed response under a wait the usage
+// header asks for is a *RateLimitedError, whichever read made it.
 func (a *API) doHeader(ctx context.Context, method, path string, q url.Values, out any) (http.Header, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.o.Timeout)
 	defer cancel()
@@ -131,7 +132,11 @@ func (a *API) doHeader(ctx context.Context, method, path string, q url.Values, o
 			} `json:"error"`
 		}
 		_ = json.Unmarshal(body, &e)
-		return resp.Header, fmt.Errorf("%w: status %d code %d", ErrAPI, resp.StatusCode, e.Error.Code)
+		err = fmt.Errorf("%w: status %d code %d", ErrAPI, resp.StatusCode, e.Error.Code)
+		if wait := usageWait(resp.Header); wait > 0 {
+			err = &RateLimitedError{Wait: wait, Err: err}
+		}
+		return resp.Header, err
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return resp.Header, fmt.Errorf("%w: malformed response", ErrAPI)
@@ -356,8 +361,8 @@ type ActionMetricsResult struct {
 // ReadActionMetricsBatch returns the per-post insights of the own posts with the
 // given media ids, InsightsBatchIDs per call. Every id has an entry: a response
 // without views, likes, replies or reposts for it is unavailable. When the API
-// rejects a whole batch as invalid (one deleted post does that), its ids are
-// read one by one so the others still succeed.
+// rejects a whole batch as invalid (400 code 100), its ids are read one by one
+// so the others still succeed.
 func (a *API) ReadActionMetricsBatch(ctx context.Context, ids []string) map[string]ActionMetricsResult {
 	out := make(map[string]ActionMetricsResult, len(ids))
 	for chunk := range slices.Chunk(ids, InsightsBatchIDs) {

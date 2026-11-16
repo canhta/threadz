@@ -19,8 +19,7 @@ The whole schema is [`internal/store/schema.sql`](../internal/store/schema.sql);
 | `metrics` | Repeated measurements per action (views, likes, replies, reposts, quotes, shares, followers, `author_replied`; the last four nullable) | Metrics |
 | `account_followers` | Latest own follower count per agent, read from the own profile page at the start of each agent wake, and its `source` (`followers_browser` or `followers_api_fallback`); a metrics batch stamps its samples with this row | `read_own_metrics` |
 | `account_samples` | One row per account insights read of a window total (`metric`, `since`, `until`, `value`, `source`); append only, skipped when equal to the previous row of the same metric and window ([threads.md](threads.md#account-insights)) | Metrics |
-| `account_daily` | The account `views` per Pacific day (`day`), with `value` NULL when the API returned no bucket, `settled` once read 3 days after the day closed, the day's UTC bounds and `fetched_at`; upserted from the trailing 3 days of each read | Metrics |
-| `account_reconciliation` | A view, not a table: each `account_daily` day's `account_views`, the `attributed` views its own actions gained that day from `metrics`, and the `residual` | none |
+| `account_daily` | The account `views` per Pacific day (`day`), with `value` NULL when the API returned no bucket, the day's UTC bounds and `fetched_at`; upserted from the trailing 3 days of each read, a later read replacing the value | Metrics |
 | `contacts` | Username, `reply_count_7d`, `do_not_contact`, `reason`. Rate limiting only; no description of the person | Guard |
 | `ledger_phases` | The only spend record: per agent, local day (date in `schedule.timezone`) and phase (`agent`, `dream`, `critic`), token and USD totals. A daily total is a SUM over phases | LLM client |
 | `trend_stories` | Ranked external stories from `fetch_trends` | Trends |

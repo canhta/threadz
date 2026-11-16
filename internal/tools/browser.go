@@ -146,6 +146,9 @@ type ActionMetrics struct {
 	threads.Metrics
 	AuthorReplied *bool  `json:"author_replied,omitempty"`
 	Failure       string `json:"failure,omitempty"`
+	// RetryAfterSeconds is the wait the API asked for when the read failed
+	// under its usage limit; 0 when it asked for none.
+	RetryAfterSeconds int64 `json:"retry_after_seconds,omitempty"`
 }
 
 // Reason codes a batch read gives for an action it could not measure.
@@ -154,7 +157,19 @@ const (
 	FailureNotFound    = "media_not_found"
 	FailureAuth        = "auth_required"
 	FailureRead        = "read_failed"
+	FailureSource      = "source_unavailable"
 )
+
+// metricCallTimeout bounds one insights call and one replies read.
+const metricCallTimeout = 30 * time.Second
+
+// MetricReadBudget is the longest a read_own_metrics call for the given number
+// of actions takes: one metricCallTimeout per InsightsBatchIDs actions for the
+// insights, then at most one replies read of metricCallTimeout per action.
+func MetricReadBudget(actions int) time.Duration {
+	calls := (actions + threads.InsightsBatchIDs - 1) / threads.InsightsBatchIDs
+	return time.Duration(calls+actions) * metricCallTimeout
+}
 
 func metricFailure(err error) string {
 	switch {
@@ -167,8 +182,9 @@ func metricFailure(err error) string {
 }
 
 // actionMetrics reads the own actions' insights in one batched call. A
-// cancellation or a logged-out or captcha source fails the call (the last two
-// stop the agent); any other failure marks its action and leaves the rest.
+// cancellation of ctx or a logged-out or captcha source fails the call (the
+// last two stop the agent); any other failure, a request timeout included,
+// marks its action and leaves the rest.
 func (d *Dispatcher) actionMetrics(ctx context.Context, actionIDs []int64) (any, error) {
 	out := make([]ActionMetrics, len(actionIDs))
 	actions := make(map[int64]store.ConfirmedAction, len(actionIDs))
@@ -189,7 +205,7 @@ func (d *Dispatcher) actionMetrics(ctx context.Context, actionIDs []int64) (any,
 	read := map[string]threads.ActionMetricsResult{}
 	if len(media) > 0 {
 		calls := (len(media) + threads.InsightsBatchIDs - 1) / threads.InsightsBatchIDs
-		call, cancel := context.WithTimeout(ctx, time.Duration(calls)*30*time.Second)
+		call, cancel := context.WithTimeout(ctx, time.Duration(calls)*metricCallTimeout)
 		defer cancel()
 		read = d.opts.Threads.ReadActionMetricsBatch(call, media)
 	}
@@ -202,8 +218,14 @@ func (d *Dispatcher) actionMetrics(ctx context.Context, actionIDs []int64) (any,
 		if !ok {
 			res.Err = threads.ErrMetricsUnavailable
 		}
-		if errors.Is(res.Err, context.Canceled) || errors.Is(res.Err, context.DeadlineExceeded) || errors.Is(res.Err, threads.ErrLoggedOut) || errors.Is(res.Err, threads.ErrCaptcha) {
-			return nil, res.Err
+		if ctx.Err() != nil || errors.Is(res.Err, threads.ErrLoggedOut) || errors.Is(res.Err, threads.ErrCaptcha) {
+			return nil, cmp.Or(res.Err, ctx.Err())
+		}
+		var limited *threads.RateLimitedError
+		if errors.As(res.Err, &limited) {
+			out[i].Failure = FailureSource
+			out[i].RetryAfterSeconds = int64((limited.Wait + time.Second - 1) / time.Second)
+			continue
 		}
 		if res.Err != nil {
 			out[i].Failure = metricFailure(res.Err)
@@ -233,7 +255,7 @@ func (d *Dispatcher) finishActionMetrics(ctx context.Context, action store.Confi
 	}
 	out.Metrics = values
 	if action.Kind == "reply" && action.TargetUsername != "" {
-		call, cancel := context.WithTimeout(ctx, 30*time.Second)
+		call, cancel := context.WithTimeout(ctx, metricCallTimeout)
 		defer cancel()
 		if page, readErr := d.opts.Threads.ReadReplies(call, action.MediaID); readErr == nil {
 			if err := d.observeStops(ctx, threads.OpReadReplies, page); err != nil {

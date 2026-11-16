@@ -391,8 +391,27 @@ func (r snapshotReader) metrics(snap *DashboardSnapshot) error {
 	return rows.Err()
 }
 
+// accountDaysSQL lists the newest account days with the views the agent's own
+// actions gained in each: every sample's growth over the action's previous
+// sample, in one ordered pass over the samples at or after the first argument
+// (a date, which orders before every timestamp of that day), added to the
+// Pacific day that holds the sample. A first sample counts in full unless the
+// action was posted before that date, whose earlier samples are out of reach.
+const accountDaysSQL = `WITH gained AS (
+	SELECT m.measured_at AS at,
+	       MAX(0, m.views - COALESCE(LAG(m.views) OVER (PARTITION BY m.action_id ORDER BY m.measured_at), CASE WHEN a.posted_at < ?1 THEN m.views ELSE 0 END)) AS views
+	FROM metrics m JOIN actions a ON a.id = m.action_id AND a.agent_id = m.agent_id
+	WHERE m.agent_id = ?2 AND a.dry_run = 0 AND m.measured_at >= ?1
+)
+SELECT d.day, d.value, COALESCE(SUM(g.views), 0)
+FROM (SELECT day, value, starts_at, ends_at FROM account_daily WHERE agent_id = ?2 AND metric = 'views' ORDER BY day DESC LIMIT ?3) d
+LEFT JOIN gained g ON g.at >= d.starts_at AND g.at < d.ends_at
+GROUP BY d.day
+ORDER BY d.day DESC`
+
 func (r snapshotReader) accountDays(snap *DashboardSnapshot) error {
-	rows, err := r.rows(`SELECT day,account_views,attributed FROM account_reconciliation WHERE agent_id=? ORDER BY day DESC LIMIT ?`, r.q.AgentID, snapshotAccountDays)
+	since := r.q.Now.AddDate(0, 0, -snapshotAccountDays).UTC().Format("2006-01-02")
+	rows, err := r.rows(accountDaysSQL, since, r.q.AgentID, snapshotAccountDays)
 	if err != nil {
 		return err
 	}

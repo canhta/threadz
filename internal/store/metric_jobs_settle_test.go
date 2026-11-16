@@ -32,13 +32,17 @@ func TestMetricJobsSettleEndsFlatActions(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
 			s := metricCoreStore(t)
-			id := metricCoreAction(t, s, "a", base.Format(time.RFC3339Nano), "https://example.test/own", false)
+			metricCoreAction(t, s, "a", base.Format(time.RFC3339Nano), "https://example.test/own", false)
 			if _, err := s.SeedMetricJobs(ctx, "a", base); err != nil {
 				t.Fatal(err)
 			}
 			if c.previous != nil {
-				if err := s.RecordMetricSample(ctx, "a", id, base.Add(c.claimAt-time.Hour), *c.previous); err != nil {
-					t.Fatal(err)
+				earlier, err := s.ClaimMetricJobs(ctx, "a", base.Add(c.claimAt-time.Hour), 10*time.Minute, 10)
+				if err != nil || len(earlier) == 0 {
+					t.Fatalf("earlier claim = %+v, %v", earlier, err)
+				}
+				if ok, err := s.CompleteMetricJobs(ctx, earlier, base.Add(c.claimAt-time.Hour), *c.previous); err != nil || !ok {
+					t.Fatalf("earlier complete = %v, %v", ok, err)
 				}
 			}
 			jobs, err := s.ClaimMetricJobs(ctx, "a", base.Add(c.claimAt), 10*time.Minute, 10)
@@ -52,10 +56,41 @@ func TestMetricJobsSettleEndsFlatActions(t *testing.T) {
 				t.Errorf("open jobs = %d, want %d", open, c.wantOpen)
 			}
 			settled := countRows(t, s, `SELECT COUNT(*) FROM metric_jobs WHERE reason='settled' AND completed_at IS NOT NULL AND lease_until IS NULL`)
-			if want := len(store.MetricWindowMinutes) - len(jobs) - c.wantOpen; settled != want {
+			measured := countRows(t, s, `SELECT COUNT(*) FROM metric_jobs WHERE reason='' AND completed_at IS NOT NULL`)
+			if want := len(store.MetricWindowMinutes) - measured - c.wantOpen; settled != want {
 				t.Errorf("settled jobs = %d, want %d", settled, want)
 			}
 		})
+	}
+}
+
+func TestMetricJobsSettleComparesWithTheScheduledSampleNotARefresh(t *testing.T) {
+	ctx := context.Background()
+	s := metricCoreStore(t)
+	base := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	id := metricCoreAction(t, s, "a", base.Format(time.RFC3339Nano), "https://example.test/own", false)
+	if _, err := s.SeedMetricJobs(ctx, "a", base); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ClaimMetricJobs(ctx, "a", base.Add(12*time.Hour), 10*time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CompleteMetricJobs(ctx, first, base.Add(12*time.Hour), store.MetricValues{Views: 1000, Likes: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecordMetricSample(ctx, "a", id, base.Add(23*time.Hour+59*time.Minute), store.MetricValues{Views: 9000, Likes: 10}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.ClaimMetricJobs(ctx, "a", base.Add(24*time.Hour), 10*time.Minute, 10)
+	if err != nil || len(next) != 1 {
+		t.Fatalf("claim = %+v, %v", next, err)
+	}
+	if _, err = s.CompleteMetricJobs(ctx, next, base.Add(24*time.Hour), store.MetricValues{Views: 9000, Likes: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if open := countRows(t, s, `SELECT COUNT(*) FROM metric_jobs WHERE completed_at IS NULL`); open != 3 {
+		t.Fatalf("open jobs = %d, want 3: a refresh sample at 23 h 59 m settled the action", open)
 	}
 }
 

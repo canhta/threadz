@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/canhta/threadz/internal/guard"
 	"github.com/canhta/threadz/internal/llm"
@@ -357,8 +358,45 @@ func TestActionMetricsBatchLoggedOutFailsTheCall(t *testing.T) {
 func TestActionMetricsBatchCancellationFailsTheCall(t *testing.T) {
 	h := newBrowserHarness(t, true)
 	insertPipelineAction(t, h, 1, "agent", false, "https://threads.example/own/one")
+	ctx, cancel := context.WithCancel(context.Background())
+	onOp(h.backend, threads.OpReadActionMetrics, func(context.Context) { cancel() })
 	h.backend.Errors[threads.OpReadActionMetrics] = context.Canceled
-	if _, err := h.call("read_own_metrics", `{"action_ids":[1]}`); !errors.Is(err, context.Canceled) {
+	call := llm.ToolCall{ID: "cancel", Type: "function", Function: llm.CallFunction{Name: "read_own_metrics", Arguments: `{"action_ids":[1]}`}}
+	if _, err := h.dispatch.DispatchHarness(ctx, call); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled batch = %v, want context.Canceled", err)
+	}
+}
+
+func TestActionMetricsRequestTimeoutFailsOnlyItsActions(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	const slow, fast = "https://threads.example/own/slow", "https://threads.example/own/fast"
+	insertPipelineAction(t, h, 1, "agent", false, slow)
+	insertPipelineAction(t, h, 2, "agent", false, fast)
+	h.backend.Actions[mediaOf(fast)] = threads.Metrics{Views: 9}
+	h.backend.ActionErrors = map[string]error{mediaOf(slow): context.DeadlineExceeded}
+	out, err := h.call("read_own_metrics", `{"action_ids":[1,2]}`)
+	if err != nil {
+		t.Fatalf("a request timeout failed the whole batch: %v", err)
+	}
+	got := decodeActionMetricsBatch(t, out)
+	if len(got) != 2 || got[0].Failure != tools.FailureRead || got[1].Views != 9 || got[1].Failure != "" {
+		t.Fatalf("batch = %+v, want the slow action read_failed and the other measured", got)
+	}
+}
+
+func TestActionMetricsReportsTheWaitTheAPIAskedFor(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	const limited, fine = "https://threads.example/own/limited", "https://threads.example/own/fine"
+	insertPipelineAction(t, h, 1, "agent", false, limited)
+	insertPipelineAction(t, h, 2, "agent", false, fine)
+	h.backend.Actions[mediaOf(fine)] = threads.Metrics{Views: 9}
+	h.backend.ActionErrors = map[string]error{mediaOf(limited): &threads.RateLimitedError{Wait: 12 * time.Minute, Err: threads.ErrAPI}}
+	out, err := h.call("read_own_metrics", `{"action_ids":[1,2]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeActionMetricsBatch(t, out)
+	if got[0].Failure != tools.FailureSource || got[0].RetryAfterSeconds != 720 || got[1].Views != 9 || got[1].RetryAfterSeconds != 0 {
+		t.Fatalf("batch = %+v, want the first source_unavailable with a 720 s wait", got)
 	}
 }

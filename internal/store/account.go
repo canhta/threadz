@@ -16,26 +16,18 @@ type AccountDay struct {
 	Value            *int64
 }
 
-// accountSettleAfter is how long after a day closed its value is taken as final.
-const accountSettleAfter = 3 * day
-
 // UpsertAccountDays stores the days one account insights read returned. A
-// settled day is never rewritten; a missing value never replaces a stored one;
-// a day settles once it was read accountSettleAfter after it closed.
+// later read of a day replaces its value; a missing value never replaces a
+// stored one.
 func (s *Store) UpsertAccountDays(ctx context.Context, agentID, metric string, days []AccountDay, at time.Time) error {
 	if agentID == "" || metric == "" || at.IsZero() {
 		return errors.New("storing account days: invalid agent, metric or time")
 	}
 	return s.write(ctx, func(conn *sql.Conn) error {
 		for _, d := range days {
-			settled := d.Value != nil && !at.Before(d.EndsAt.Add(accountSettleAfter))
-			if _, err := conn.ExecContext(ctx, `INSERT INTO account_daily(agent_id,day,metric,value,settled,fetched_at,starts_at,ends_at) VALUES(?,?,?,?,?,?,?,?)
-				ON CONFLICT(agent_id,day,metric) DO UPDATE SET
-					value=COALESCE(excluded.value,account_daily.value),
-					settled=CASE WHEN COALESCE(excluded.value,account_daily.value) IS NOT NULL THEN excluded.settled ELSE 0 END,
-					fetched_at=excluded.fetched_at
-				WHERE account_daily.settled=0`,
-				agentID, d.Day, metric, d.Value, settled, formatStoreTimestamp(at), formatStoreTimestamp(d.StartsAt), formatStoreTimestamp(d.EndsAt)); err != nil {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO account_daily(agent_id,day,metric,value,fetched_at,starts_at,ends_at) VALUES(?,?,?,?,?,?,?)
+				ON CONFLICT(agent_id,day,metric) DO UPDATE SET value=COALESCE(excluded.value,account_daily.value),fetched_at=excluded.fetched_at`,
+				agentID, d.Day, metric, d.Value, formatStoreTimestamp(at), formatStoreTimestamp(d.StartsAt), formatStoreTimestamp(d.EndsAt)); err != nil {
 				return fmt.Errorf("storing account day %s: %w", d.Day, err)
 			}
 		}

@@ -56,6 +56,9 @@ func TestAccountInsightsRefusals(t *testing.T) {
 	since, until := time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC)
 	for name, body := range map[string]string{
 		"no metrics":     `{"data":[]}`,
+		"totals only":    `{"data":[{"name":"likes","total_value":{"value":5}}]}`,
+		"clicks only":    `{"data":[{"name":"clicks","link_total_values":[{"value":1,"link_url":"u"}]}]}`,
+		"no view days":   `{"data":[{"name":"views","values":[]},{"name":"likes","total_value":{"value":5}}]}`,
 		"bad end_time":   `{"data":[{"name":"views","values":[{"value":1,"end_time":"yesterday"}]}]}`,
 		"negative views": `{"data":[{"name":"views","values":[{"value":-1,"end_time":"2026-11-14T08:00:00+0000"}]}]}`,
 		"total missing":  `{"data":[{"name":"likes"}]}`,
@@ -106,6 +109,27 @@ func TestAccountInsightsUsageHeader(t *testing.T) {
 	f.headers["GET "+accountPath] = used
 	if _, err = api.ReadAccountInsights(ctx, since, until); err == nil || errors.As(err, &limited) {
 		t.Fatalf("failed read without a wait: %v", err)
+	}
+}
+
+func TestBatchReadUsageHeaderWaitReachesEveryID(t *testing.T) {
+	const blocked = `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":12}]}`
+	f, api, _ := newFake(t)
+	f.route("GET", "/insights", "error.json")
+	f.headers = map[string]string{"GET /insights": blocked}
+	got := api.ReadActionMetricsBatch(context.Background(), []string{"1", "2"})
+	for id, r := range got {
+		var limited *RateLimitedError
+		if !errors.As(r.Err, &limited) || limited.Wait != 12*time.Minute || !errors.Is(r.Err, ErrAPI) {
+			t.Errorf("%s: err = %v, want a RateLimitedError of 12 minutes", id, r.Err)
+		}
+	}
+	f.headers["GET /insights"] = "{}"
+	for id, r := range api.ReadActionMetricsBatch(context.Background(), []string{"1"}) {
+		var limited *RateLimitedError
+		if r.Err == nil || errors.As(r.Err, &limited) {
+			t.Errorf("%s: a failure without a wait = %v", id, r.Err)
+		}
 	}
 }
 

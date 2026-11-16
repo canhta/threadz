@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	// AccountTrailingDays is how many closed Pacific days an account read covers:
-	// the series can still change for 3 days after a day closes.
+	// AccountTrailingDays is how many closed Pacific days each account read
+	// after the backfill covers.
 	AccountTrailingDays = 3
 	// AccountBackfillDays is the window of the first read. The API serves up to
 	// 2 years and one call returned 700 daily buckets.
@@ -102,14 +102,10 @@ func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (
 	var in insights
 	q := url.Values{"metric": {accountInsightMetrics}, "since": {strconv.FormatInt(since.Unix(), 10)}, "until": {strconv.FormatInt(until.Unix(), 10)}}
 	header, err := a.doHeader(ctx, http.MethodGet, "/"+a.o.UserID+"/threads_insights", q, &in)
-	wait := usageWait(header)
 	if err != nil {
-		if wait > 0 {
-			return AccountInsights{}, &RateLimitedError{Wait: wait, Err: err}
-		}
 		return AccountInsights{}, err
 	}
-	out := AccountInsights{Since: since, Until: until, Totals: map[string]int64{}, RegainAfter: wait}
+	out := AccountInsights{Since: since, Until: until, Totals: map[string]int64{}, RegainAfter: usageWait(header)}
 	for _, d := range in.Data {
 		switch d.Name {
 		case "views":
@@ -134,7 +130,7 @@ func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (
 			}
 		}
 	}
-	if len(out.Views) == 0 && len(out.Totals) == 0 {
+	if len(out.Views) == 0 {
 		return AccountInsights{}, ErrMetricsUnavailable
 	}
 	return out, nil

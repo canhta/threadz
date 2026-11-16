@@ -21,7 +21,6 @@ CREATE TABLE account_daily (
     day TEXT NOT NULL,
     metric TEXT NOT NULL,
     value INTEGER CHECK (value IS NULL OR value >= 0),
-    settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0, 1)),
     fetched_at TEXT NOT NULL,
     starts_at TEXT NOT NULL,
     ends_at TEXT NOT NULL,
@@ -284,15 +283,3 @@ CREATE UNIQUE INDEX wakes_phase_key ON wakes(agent_id,kind,phase_key) WHERE phas
 CREATE UNIQUE INDEX seen_posts_url ON seen_posts(agent_id,url);
 
 CREATE INDEX seen_posts_recent ON seen_posts(agent_id,read_at DESC);
-
-CREATE VIEW account_reconciliation AS
-SELECT agent_id, day, account_views, attributed, account_views - attributed AS residual
-FROM (
-    SELECT d.agent_id AS agent_id, d.day AS day, d.value AS account_views,
-           COALESCE((SELECT SUM(MAX(0,
-                  COALESCE((SELECT m.views FROM metrics m WHERE m.action_id = x.id AND julianday(m.measured_at) <= julianday(d.ends_at) ORDER BY julianday(m.measured_at) DESC LIMIT 1), 0)
-                - COALESCE((SELECT m.views FROM metrics m WHERE m.action_id = x.id AND julianday(m.measured_at) < julianday(d.starts_at) ORDER BY julianday(m.measured_at) DESC LIMIT 1), 0)))
-                FROM actions x WHERE x.agent_id = d.agent_id AND x.dry_run = 0), 0) AS attributed
-    FROM account_daily d
-    WHERE d.metric = 'views'
-);
