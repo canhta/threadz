@@ -97,6 +97,14 @@ func (a *adminService) Handle(ctx context.Context, req admin.Request) (any, erro
 			}
 			return maintenanceOutcome{Step: admin.MetricsRun, Agent: t.ID, Count: res.ClaimedJobs}, nil
 		})
+	case admin.MetricsRefresh:
+		return a.job(ctx, func(jobCtx context.Context) (any, error) {
+			res, err := r.RefreshMetrics(jobCtx, req.Actions)
+			if err != nil {
+				return nil, err
+			}
+			return maintenanceOutcome{Step: admin.MetricsRefresh, Agent: t.ID, Count: res.Refreshed, Skipped: res.Skipped}, nil
+		})
 	case admin.TrendsRefresh:
 		return a.job(ctx, func(jobCtx context.Context) (any, error) {
 			n, err := r.RefreshTrends(jobCtx)

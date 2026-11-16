@@ -22,21 +22,22 @@ import (
 // Commands the live process serves. Everything else the operator CLI reads
 // from the database or checks locally.
 const (
-	Status        = "status"
-	Wake          = "wake"
-	Pause         = "pause"
-	Resume        = "resume"
-	Kill          = "kill"
-	MetricsRun    = "metrics_run"
-	Prune         = "prune"
-	TrendsRefresh = "trends_refresh"
-	Context       = "context"
-	OAuthLink     = "oauth_link"
-	Cookies       = "cookies"
-	ForgetLesson  = "forget_lesson"
+	Status         = "status"
+	Wake           = "wake"
+	Pause          = "pause"
+	Resume         = "resume"
+	Kill           = "kill"
+	MetricsRun     = "metrics_run"
+	MetricsRefresh = "metrics_refresh"
+	Prune          = "prune"
+	TrendsRefresh  = "trends_refresh"
+	Context        = "context"
+	OAuthLink      = "oauth_link"
+	Cookies        = "cookies"
+	ForgetLesson   = "forget_lesson"
 )
 
-var commands = map[string]bool{Status: true, Wake: true, Pause: true, Resume: true, Kill: true, MetricsRun: true, Prune: true, TrendsRefresh: true, Context: true, OAuthLink: true, Cookies: true, ForgetLesson: true}
+var commands = map[string]bool{Status: true, Wake: true, Pause: true, Resume: true, Kill: true, MetricsRun: true, MetricsRefresh: true, Prune: true, TrendsRefresh: true, Context: true, OAuthLink: true, Cookies: true, ForgetLesson: true}
 
 // ErrBusy means another operator job is waiting or running.
 var ErrBusy = errors.New("another operator job is waiting or running")
@@ -53,6 +54,8 @@ type Request struct {
 	DryRun  bool   `json:"dry_run,omitempty"`
 	// Lesson is the lesson id for ForgetLesson.
 	Lesson int64 `json:"lesson,omitempty"`
+	// Actions are the own action ids for MetricsRefresh; none means every own action younger than a day.
+	Actions []int64 `json:"actions,omitempty"`
 	// Cookies is the owner's cookie export for the Cookies command. It is never
 	// logged: the audit record carries only the command, agent and outcome.
 	Cookies string `json:"cookies,omitempty"`

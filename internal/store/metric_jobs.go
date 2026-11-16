@@ -366,13 +366,13 @@ func settleMetricJobs(ctx context.Context, conn *sql.Conn, jobs []MetricJob, mea
 }
 
 // YoungOwnActions returns those of ids that are confirmed actions of the agent
-// posted at or after since, in id order.
+// posted at or after since, in id order. No ids means every such action.
 func (s *Store) YoungOwnActions(ctx context.Context, agentID string, ids []int64, since time.Time) ([]int64, error) {
 	list, err := json.Marshal(ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading young actions: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM actions WHERE agent_id=? AND dry_run=0 AND trim(thread_url)<>'' AND media_id<>'' AND julianday(posted_at)>=julianday(?) AND id IN (SELECT value FROM json_each(?)) ORDER BY id`, agentID, formatTime(since), string(list))
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM actions WHERE agent_id=? AND dry_run=0 AND trim(thread_url)<>'' AND media_id<>'' AND julianday(posted_at)>=julianday(?) AND (?=0 OR id IN (SELECT value FROM json_each(?))) ORDER BY id`, agentID, formatTime(since), len(ids), string(list))
 	if err != nil {
 		return nil, fmt.Errorf("reading young actions: %w", err)
 	}

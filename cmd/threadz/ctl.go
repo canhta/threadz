@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ Commands talk to the running service over its admin socket:
   wake --agent ID [--phase agent|dream] [--dry-run]
   pause|resume|kill --agent ID
   metrics run --agent ID                    measure the targets that are due now
+  metrics-refresh --agent ID [action_id ...] sample own actions younger than 24 h now; none given means all
   prune                                     apply the retention table now
   trends refresh --agent ID
   threads connect --agent ID                send the owner a one-time link to authorize Threads
@@ -111,6 +113,8 @@ func runCtl(ctx context.Context, args []string, getenv func(string) string, stdo
 			return ctlUsageError(stderr, "metrics takes the subcommand run")
 		}
 		return ctlMaintenance(ctx, getenv, admin.MetricsRun, true, rest[1:], stdout, stderr)
+	case "metrics-refresh":
+		return ctlMaintenance(ctx, getenv, admin.MetricsRefresh, true, rest, stdout, stderr)
 	case "trends":
 		if len(rest) == 0 || rest[0] != "refresh" {
 			return ctlUsageError(stderr, "trends takes the subcommand refresh")
@@ -265,11 +269,23 @@ func ctlControl(ctx context.Context, getenv func(string) string, command string,
 
 func ctlMaintenance(ctx context.Context, getenv func(string) string, command string, needAgent bool, args []string, stdout, stderr io.Writer) int {
 	f := newCtlFlags(command, getenv)
-	if _, ok := f.parse(args, needAgent, stderr); !ok {
+	rest, ok := f.parse(args, needAgent, stderr)
+	if !ok {
 		return exitUsage
 	}
-	return ctlCall(ctx, f, admin.Request{Command: command, Agent: *f.agent}, stdout, stderr, func(w io.Writer, o maintenanceOutcome) {
+	var actions []int64
+	for _, a := range rest {
+		id, err := strconv.ParseInt(a, 10, 64)
+		if command != admin.MetricsRefresh || err != nil || id <= 0 {
+			return ctlUsageError(stderr, command+" takes only flags, or action ids for metrics_refresh")
+		}
+		actions = append(actions, id)
+	}
+	return ctlCall(ctx, f, admin.Request{Command: command, Agent: *f.agent, Actions: actions}, stdout, stderr, func(w io.Writer, o maintenanceOutcome) {
 		fmt.Fprintf(w, "%s: %d\n", strings.ReplaceAll(o.Step, "_", " "), o.Count)
+		if o.Skipped > 0 {
+			fmt.Fprintf(w, "  skipped by the cooldown: %d\n", o.Skipped)
+		}
 		for table, n := range o.Tables {
 			fmt.Fprintf(w, "  %s: %d\n", table, n)
 		}

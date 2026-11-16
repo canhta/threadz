@@ -46,10 +46,11 @@ type controlOutcome struct {
 }
 
 type maintenanceOutcome struct {
-	Step   string           `json:"step"`
-	Agent  string           `json:"agent,omitempty"`
-	Count  int              `json:"count"`
-	Tables map[string]int64 `json:"tables,omitempty"`
+	Step    string           `json:"step"`
+	Agent   string           `json:"agent,omitempty"`
+	Count   int              `json:"count"`
+	Skipped int              `json:"skipped,omitempty"`
+	Tables  map[string]int64 `json:"tables,omitempty"`
 }
 
 type cookiesOutcome struct {

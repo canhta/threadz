@@ -65,6 +65,8 @@ type Result struct {
 	AccountReads int `json:"account_reads"`
 	// Refreshed counts the samples stored for refresh requests.
 	Refreshed int `json:"refreshed"`
+	// Skipped counts the actions a refresh request left out because they were refreshed less than RefreshCooldown ago.
+	Skipped int `json:"skipped"`
 }
 type Processor struct {
 	mu   sync.Mutex
@@ -398,7 +400,8 @@ func (p *Processor) readBatch(ctx context.Context, dispatcher *tools.Dispatcher,
 // Refresh samples the given own actions that are younger than a day now, apart
 // from the schedule, at most once per RefreshCooldown per action. It is the one
 // entry point for an operator or the dashboard asking for fresher numbers. The
-// result counts the samples stored.
+// result counts the samples stored and the actions the cooldown skipped. With
+// no ids it covers every own action younger than a day.
 func (p *Processor) Refresh(ctx context.Context, actionIDs []int64) (Result, error) {
 	now := p.opts.Now()
 	young, err := p.opts.Store.YoungOwnActions(ctx, p.opts.Template.ID, actionIDs, now.Add(-refreshAge))
@@ -414,18 +417,23 @@ func (p *Processor) Refresh(ctx context.Context, actionIDs []int64) (Result, err
 			delete(p.refreshLast, id)
 		}
 	}
+	skipped := 0
 	for _, id := range young {
-		if _, cooling := p.refreshLast[id]; !cooling {
-			p.refreshLast[id] = now
-			p.refreshQueue = append(p.refreshQueue, id)
+		if _, cooling := p.refreshLast[id]; cooling {
+			skipped++
+			continue
 		}
+		p.refreshLast[id] = now
+		p.refreshQueue = append(p.refreshQueue, id)
 	}
 	queued := len(p.refreshQueue)
 	p.refreshMu.Unlock()
 	if queued == 0 {
-		return Result{}, nil
+		return Result{Skipped: skipped}, nil
 	}
-	return p.RunDue(ctx)
+	result, err := p.RunDue(ctx)
+	result.Skipped = skipped
+	return result, err
 }
 
 func (p *Processor) takeRefresh() []int64 {

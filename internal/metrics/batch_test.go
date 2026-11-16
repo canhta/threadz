@@ -157,7 +157,7 @@ func TestBatchReadRefreshCooldownOnTheInjectedClock(t *testing.T) {
 	}
 
 	r.now = r.now.Add(metrics.RefreshCooldown - time.Second)
-	if got := refresh(1); got.Refreshed != 0 || r.source.Count(threads.OpReadActionMetrics) != 1 {
+	if got := refresh(1); got.Refreshed != 0 || got.Skipped != 1 || r.source.Count(threads.OpReadActionMetrics) != 1 {
 		t.Fatalf("refresh inside the cooldown = %+v, reads %d", got, r.source.Count(threads.OpReadActionMetrics))
 	}
 	if got := refresh(1, 2); got.Refreshed != 1 || r.source.Last(threads.OpReadActionMetrics).Arg != "m2" {
@@ -250,5 +250,17 @@ func TestPlateauStopLikeOrReplyKeepsAnActionGoing(t *testing.T) {
 	r.runDue()
 	if n := r.count(`SELECT COUNT(*) FROM metric_jobs WHERE completed_at IS NULL`); n != 3 {
 		t.Fatalf("open jobs = %d, want the three after 24h", n)
+	}
+}
+
+func TestBatchReadRefreshWithoutIDsCoversEveryYoungAction(t *testing.T) {
+	r := newBatchRig(t, 2)
+	r.at(10 * time.Minute)
+	got, err := r.p.Refresh(context.Background(), nil)
+	if err != nil || got.Refreshed != 2 || got.Skipped != 0 {
+		t.Fatalf("refresh = %+v, %v", got, err)
+	}
+	if got, err = r.p.Refresh(context.Background(), nil); err != nil || got.Refreshed != 0 || got.Skipped != 2 {
+		t.Fatalf("second refresh = %+v, %v", got, err)
 	}
 }

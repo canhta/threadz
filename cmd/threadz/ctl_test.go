@@ -21,6 +21,7 @@ import (
 	"github.com/canhta/threadz/internal/llm"
 	"github.com/canhta/threadz/internal/logging"
 	"github.com/canhta/threadz/internal/store"
+	"github.com/canhta/threadz/internal/threads"
 )
 
 var ctlNow = time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
@@ -34,6 +35,7 @@ type ctlServer struct {
 	id      string
 	deps    ctlDeps
 	service *adminService
+	source  *threads.Memory
 }
 
 // newCtlServer runs a scheduler with a Control and the admin service on a temp
@@ -48,7 +50,7 @@ func newCtlServer(t *testing.T) *ctlServer {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	s := &ctlServer{t: t, socket: filepath.Join(dir, "a.sock"), db: filepath.Join(dir, "tw.db")}
+	s := &ctlServer{t: t, source: threads.NewMemory(), socket: filepath.Join(dir, "a.sock"), db: filepath.Join(dir, "tw.db")}
 	s.st, err = store.Open(ctx, s.db)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +60,7 @@ func newCtlServer(t *testing.T) *ctlServer {
 	s.id = tmpl.ID
 	now := func() time.Time { return ctlNow }
 	s.fixture = agent.NewOfflineFixture(now)
-	r, err := agent.New(agent.Options{Store: s.st, Template: tmpl, Now: now, HTTPClient: s.fixture.Client(), FetchTrends: s.fixture.Trends})
+	r, err := agent.New(agent.Options{Store: s.st, Template: tmpl, Now: now, HTTPClient: s.fixture.Client(), FetchTrends: s.fixture.Trends, ThreadsFactory: func(context.Context, config.Template) (threads.Backend, error) { return s.source, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,5 +461,51 @@ func TestDraftSampleInputParses(t *testing.T) {
 	}
 	if !ap || posts < 3 || replies < 5 {
 		t.Fatalf("posts %d replies %d ap %v", posts, replies, ap)
+	}
+}
+
+func TestCtlMetricsRefresh(t *testing.T) {
+	s := newCtlServer(t)
+	for i, media := range []string{"m1", "m2"} {
+		if _, err := s.st.DB().Exec(`INSERT INTO actions(id,agent_id,kind,text,dry_run,posted_at,thread_url,media_id) VALUES(?,?,'post','',0,?,'https://fixture.test/own','`+media+`')`, i+1, s.id, ctlNow.Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+		s.source.Actions[media] = threads.Metrics{Views: 10}
+	}
+	// Flag parsing stops at the first id, so the ids come last.
+	run := func(args ...string) (int, string, string) {
+		var out, errOut bytes.Buffer
+		full := append([]string{"metrics-refresh", "--socket", s.socket, "--db", s.db, "--agent", s.id}, args...)
+		code := runCtl(context.Background(), full, func(string) string { return "" }, &out, &errOut, s.deps)
+		return code, out.String(), errOut.String()
+	}
+	refresh := func(args ...string) maintenanceOutcome {
+		t.Helper()
+		code, out, stderr := run(append([]string{"--json"}, args...)...)
+		if code != 0 {
+			t.Fatalf("code=%d %s", code, stderr)
+		}
+		return decode[maintenanceOutcome](t, out)
+	}
+	if got := refresh("1"); got.Step != admin.MetricsRefresh || got.Count != 1 || got.Skipped != 0 {
+		t.Fatalf("with ids = %+v", got)
+	}
+	if got := refresh(); got.Count != 1 || got.Skipped != 1 {
+		t.Fatalf("without ids = %+v", got)
+	}
+	if got := refresh(); got.Count != 0 || got.Skipped != 2 {
+		t.Fatalf("a second call inside 60 s = %+v", got)
+	}
+	_, out, _ := run()
+	if want := "metrics refresh: 0\n  skipped by the cooldown: 2\n"; out != want {
+		t.Fatalf("human output = %q", out)
+	}
+	for _, bad := range [][]string{{"x"}, {"0"}} {
+		if code, _, stderr := run(bad...); code != exitUsage || !strings.Contains(stderr, "takes only") {
+			t.Fatalf("%v: code=%d %s", bad, code, stderr)
+		}
+	}
+	if code, _, _ := s.ctl("prune", "1"); code != exitUsage {
+		t.Fatalf("prune accepted an id: %d", code)
 	}
 }

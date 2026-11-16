@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/canhta/threadz/internal/agent"
+	"github.com/canhta/threadz/internal/config"
 	"github.com/canhta/threadz/internal/store"
+	"github.com/canhta/threadz/internal/threads"
 )
 
 func TestSchedulerPollsMetricsBeforeAgentChosen24HourWake(t *testing.T) {
@@ -52,5 +54,37 @@ func TestSchedulerPollsMetricsBeforeAgentChosen24HourWake(t *testing.T) {
 	}
 	if err = st.DB().QueryRow(`SELECT COUNT(*) FROM wakes WHERE kind='agent'`).Scan(&model); err != nil || maintenance != 1 || model != 0 {
 		t.Fatalf("maintenance=%d model=%d err=%v", maintenance, model, err)
+	}
+}
+
+func TestRuntimeMetricsRefreshSamplesYoungActionsThroughTheProcessor(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	tmpl := agent.OfflineTemplate()
+	if err = st.EnsureAgent(ctx, tmpl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB().Exec(`INSERT INTO actions(id,agent_id,kind,text,dry_run,posted_at,thread_url,media_id) VALUES(1,?,'post','',0,?,'https://fixture.test/own','m1')`, tmpl.ID, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	source := threads.NewMemory()
+	source.Actions["m1"] = threads.Metrics{Views: 7}
+	fixture := agent.NewOfflineFixture(clock)
+	r, err := agent.New(agent.Options{Store: st, Template: tmpl, Now: clock, HTTPClient: fixture.Client(), FetchTrends: fixture.Trends, ThreadsFactory: func(context.Context, config.Template) (threads.Backend, error) { return source, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.RefreshMetrics(ctx, []int64{1})
+	if err != nil || got.Refreshed != 1 || got.Skipped != 0 || source.Count(threads.OpReadActionMetrics) != 1 {
+		t.Fatalf("refresh = %+v, %v, reads %d", got, err, source.Count(threads.OpReadActionMetrics))
+	}
+	if got, err = r.RefreshMetrics(ctx, nil); err != nil || got.Refreshed != 0 || got.Skipped != 1 {
+		t.Fatalf("second refresh = %+v, %v", got, err)
 	}
 }

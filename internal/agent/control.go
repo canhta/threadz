@@ -127,6 +127,12 @@ func (r *Runtime) RunMetrics(ctx context.Context) (metrics.Result, error) {
 	return r.metrics.RunDue(ctx)
 }
 
+// RefreshMetrics samples the given own actions now, or every own action
+// younger than a day when none is given, within the processor's cooldown.
+func (r *Runtime) RefreshMetrics(ctx context.Context, actionIDs []int64) (metrics.Result, error) {
+	return r.metrics.Refresh(ctx, actionIDs)
+}
+
 // RefreshTrends replaces the agent's outside-trend snapshot now.
 func (r *Runtime) RefreshTrends(ctx context.Context) (int, error) {
 	return trends.Refresh(ctx, r.opts.Store, r.opts.Template, r.opts.FetchTrends, r.opts.Now())

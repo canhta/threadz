@@ -23,6 +23,7 @@ The service listens on a Unix socket (`--socket`, `THREADZ_ADMIN_SOCKET`, defaul
 | `wake --agent --phase agent\|dream [--dry-run]` | live process, scheduler loop | One wake now. The agent must be `running`; the schedule is skipped, every guard, limit and cap applies. `--dry-run` makes this wake's writes dry-run writes and lifts nothing |
 | `pause`, `resume`, `kill` (`--agent`) | live process | The path Telegram uses. Kill is terminal |
 | `metrics run --agent` | live process, scheduler loop | Measures targets due now (a window is never measured early) |
+| `metrics-refresh --agent [action_id ...]` | live process, scheduler loop | Samples own actions younger than 24 h now, apart from the schedule: the given ids, or every such action when none is given. An action refreshed less than 60 s ago is skipped. Prints the samples stored and the actions skipped (`count`, `skipped` with `--json`) |
 | `trends refresh --agent` | live process, scheduler loop | Replaces the trend snapshot as `fetch_trends` does |
 | `prune` | live process, scheduler loop | Applies the retention table ([data.md](data.md)) |
 | `threads connect --agent` | live process | Sends the owner a one-time authorization link over Telegram ([threads.md](threads.md)) |
