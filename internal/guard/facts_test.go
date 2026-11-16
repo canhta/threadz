@@ -95,7 +95,7 @@ func TestRecordedFollowerCountGroundsAFollowerFigure(t *testing.T) {
 	if err = post("tròn 42 follower"); err == nil {
 		t.Fatal("follower figure accepted before any follower count was recorded")
 	}
-	if err = st.RecordFollowers(context.Background(), "agent", 42, base); err != nil {
+	if err = st.RecordFollowers(context.Background(), "agent", 42, "followers_browser", base); err != nil {
 		t.Fatal(err)
 	}
 	if err = post("tròn 42 follower"); err != nil {

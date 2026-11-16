@@ -16,7 +16,8 @@ Every own-account Threads operation uses the official Threads API, except two: t
 | `find_posts` source `search` | API | `GET /keyword_search` (`search_type=TOP`; with `recent` true `RECENT` and `since` one hour back) | Each result carries `timestamp`. Without App Review for `threads_keyword_search` the endpoint searches only the authenticated user's own posts, so an empty result carries `limited_access` and the agent anchors on `fetch_trends` and `web_search` |
 | `find_posts` source `profile` | API | `GET /profile_posts?username=` | Standard access serves only a few official Meta accounts; other profiles, and profiles under 100 followers, are refused with a `limited_access` page, not an error. Flow: `find_posts` `feed` -> `find_posts` `profile` -> `read_post` or `reply` by `target` |
 | `profile` | API | `GET /profile_lookup?username=` | `follower_count` and 7-day `views_count`; a missing field stays absent, a refused lookup is an ordinary tool error |
-| `read_own_metrics` (account) | API and browser | `GET /{user}/threads_insights` (views, likes, replies, reposts, quotes); the follower count is read from the own profile page `/@{threads.username}`, not the API | The API `followers_count` lags or reads 0 on a live account, so the page count ("1 follower", "1.2K followers", "N người theo dõi") is the source of truth. The API value is the fallback when `threads.username` is unset or the page shows no count; the log names the source as `followers_browser` or `followers_api_fallback` |
+| `read_own_metrics` (account) | API and browser | `GET /{user}/threads_insights?metric=followers_count` and the own profile page `/@{threads.username}`; the account totals this read also returns are not stored (the stored account series is `read_account_insights`) | The API `followers_count` lags or reads 0 on a live account, so the page count ("1 follower", "1.2K followers", "N người theo dõi") is the source of truth. The API value is the fallback when `threads.username` is unset or the page shows no count; the log names the source as `followers_browser` or `followers_api_fallback` |
+| `read_account_insights` | API | `GET /{user}/threads_insights?metric=views,likes,replies,reposts,quotes,clicks&since=&until=` in one request | Harness read of the last `days` closed Pacific days; the poll, backfill and storage are in the Account insights section below |
 | `read_own_metrics` with `action_id`, and metric jobs | API | `GET /{post}/insights` (views, likes, replies, reposts, quotes, shares) | By the media id stored at publish; none or no views, likes, replies and reposts = unavailable, not zero |
 | `find_posts` source `feed` | Browser | Pinned `agent-browser` profile | Each post has a permalink and no id |
 | `find_posts` source `topic` | Browser | Same session as `feed`: opens the topic URL of a Trending-now `t` ref (`/search?q=&serp_type=trends&trend_fbid=`) or, for `query`, `/search?q=&serp_type=default` | Posts like `feed`, at most 20; a feed-post reply path |
@@ -32,7 +33,34 @@ Every own-account Threads operation uses the official Threads API, except two: t
 | Publish outcome | A publish that returns an id is confirmed with its permalink. A failure before the publish call (container error, not `FINISHED` after the polls) is a normal failure with no effect. After the publish call is sent, any failure, timeout or unreadable permalink is `ErrUnknownOutcome` and never retried |
 | `dry_run` | Reads execute normally. Writes retain one guarded intent without publishing. A non-dry-run backend publishes only after the intent commits, and stores `thread_url` only after the API returns the permalink. Any uncertain publish ends the wake, retains the action and counters, and disables further tool effects |
 | Reply quota key | The replied-to thread quota uses the stored target permalink, independent of the confirmed new reply URL |
-| Measured (tester account, 2026-11-12) | Account `views` is a per-day series (`values`, summed over the default two-day window); likes, replies, reposts, quotes and `followers_count` carry `total_value`. The account read stores the follower count as the latest own follower count (the API `followers_count` there is not what the page shows, see above) |
+| Measured (tester account, 2026-11-12) | `followers_count` carries `total_value`. The account read stores the follower count as the latest own follower count (the API `followers_count` there is not what the page shows, see above) |
+
+## Account insights
+
+Measured on the live account on 2026-11-16 with read-only GETs against `graph.threads.net/v1.0`.
+
+| Fact | Measured |
+|---|---|
+| What the app Views is | The account `views` series: the app Insights Views for 2026-11-10 to 2026-11-15 was 110,074 and the series summed to 110,402 (within 0.3%). The sum of the agent's own actions' last samples for the same days was 43,316, 39% of it |
+| `views` shape | Period `day`, one `values[]` bucket per Pacific day. `end_time` is midnight America/Los_Angeles (08:00 UTC in winter, 07:00 UTC in summer), and the bucket is the Pacific day that ends there. The current, unfinished Pacific day is not returned, so the series lags the live day by up to a day |
+| Window | Without `since` and `until`, 2 buckets. `since` alone runs to the last closed day; `until` alone gives the default 2 buckets; both are accepted. A `since` older than two years fails with `400` code 100 (`Metrics data is available for the last 2 years`); a 700-day range in one call returned one bucket per day |
+| `likes`, `replies`, `reposts`, `quotes` | `total_value` over the whole `since..until` window: a one-day window gives that day (130 likes against 357 for seven days) |
+| `clicks` | `link_total_values[]` of `{value, link_url}` and no `total_value` |
+| Several metrics | One request with `metric=views,likes,replies,reposts,quotes,clicks` returns all of them |
+| Usage | Every response carries `x-business-use-case-usage` (`{"<id>":[{"type":"threads","call_count":1,"total_cputime":1,"total_time":1,"estimated_time_to_regain_access":0}]}`) and no `x-app-usage` |
+| Post insights, several posts | `GET /insights?ids=a,b,c&metric=views` returns `{"a":{"data":[...]},...}` (3 ids tested; the maximum is not measured); `GET /{id}?fields=id,insights.metric(views,likes)` and `GET /?ids=a,b&fields=id` work; `POST /` with `batch=[...]` returns `400` with an empty body |
+| Post insights shape | `/{id}/insights?metric=views,likes,replies,reposts,quotes,shares` returns period `lifetime`, one value each; the replies metric is named `replies` |
+
+What the agent stores from these reads:
+
+| Item | Rule |
+|---|---|
+| Poll | The metrics wake of an `api` agent reads the account insights once an hour (the series only changes when a Pacific day closes), plus once five minutes after each Pacific midnight, through the guarded harness tool `read_account_insights`. The first read is a backfill of 700 days in one call; every later read covers the last 3 closed Pacific days. The clock is injected |
+| Backoff | A failed read retries after the 5 minute retry delay, doubled for each earlier failure up to one hour. When the usage header's `estimated_time_to_regain_access` (minutes, Meta's business-use-case rate-limit header) is above 0, the next read waits at least that long; a success under such a wait also waits it out |
+| `account_daily` | The daily `views` by Pacific date. A read upserts the days of its window; a day with no bucket is NULL, never 0, and never replaces a stored value. A day is settled once it was read 3 days after it closed, and a settled day is not rewritten |
+| `account_samples` | One append-only row per window total (`likes`, `replies`, `reposts`, `quotes`, `clicks` as the sum over links) and read, skipped when equal to the previous row of the same metric and window |
+| Reconciliation | The view `account_reconciliation` sets each day's account views against the views its own actions gained that day (from `metrics`); the dashboard shows the share |
+| Dashboard | The headline views, the views chart and the range totals are sums of `account_daily` days matched by calendar date to the dashboard's days, so a schedule zone far from Pacific time shifts a total by up to a day. Per-post rows stay from `metrics` |
 
 ## Reply routing
 

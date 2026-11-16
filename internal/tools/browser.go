@@ -64,6 +64,9 @@ func (d *Dispatcher) browserRead(ctx context.Context, tool, operation string, a 
 			return nil, rerr
 		}
 		page, err = d.opts.Threads.ReadReplies(ctx, id)
+	case threads.OpReadAccountInsights:
+		since, until := threads.AccountWindow(started, int(a.Int("days")))
+		return d.opts.Threads.ReadAccountInsights(ctx, since, until)
 	case threads.OpReadOwnMetrics:
 		if a.Int("action_id") > 0 {
 			return d.actionMetrics(ctx, a.Int("action_id"))
@@ -74,7 +77,7 @@ func (d *Dispatcher) browserRead(ctx context.Context, tool, operation string, a 
 		}
 		if err == nil && own.Followers != nil {
 			// A failed write only leaves the older follower figure on the facts sheet.
-			_ = d.opts.Store.RecordFollowers(ctx, d.opts.Template.ID, *own.Followers, started)
+			_ = d.opts.Store.RecordFollowers(ctx, d.opts.Template.ID, *own.Followers, own.FollowersSource, started)
 		}
 		return own, err
 	}

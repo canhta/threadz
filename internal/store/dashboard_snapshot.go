@@ -17,6 +17,8 @@ const (
 	snapshotSamples    = 4000
 	snapshotLedgerDays = 100
 	snapshotPhaseRows  = 300
+	// snapshotAccountDays covers the longest range and the period before it.
+	snapshotAccountDays = 200
 )
 
 // DashboardQuery scopes one snapshot to the range from From (the first day at
@@ -43,6 +45,9 @@ type DashboardSnapshot struct {
 	Ledger       []DashboardLedgerDay
 	Phases       []DashboardPhaseSpend
 	Metrics      []DashboardMetric
+	// AccountDays are the newest snapshotAccountDays days of the account views,
+	// newest first.
+	AccountDays []DashboardAccountDay
 	// SpendTotal is every dollar the agent's ledger holds, whatever the range.
 	SpendTotal float64
 	// Lessons are the active lessons and the latest retired ones, with their use.
@@ -111,6 +116,14 @@ type DashboardPhaseSpend struct {
 	TokensIn, TokensOut int64
 }
 
+// DashboardAccountDay is one Pacific day of the account's views and the views
+// the agent's own actions gained that day. Views is nil when the day has none.
+type DashboardAccountDay struct {
+	Day        string
+	Views      *int64
+	Attributed int64
+}
+
 // DashboardMetric is one cumulative measurement of a real post or reply, grouped
 // by action newest first and oldest measurement first within an action.
 type DashboardMetric struct {
@@ -135,7 +148,7 @@ func (s *Store) DashboardSnapshot(ctx context.Context, q DashboardQuery) (Dashbo
 	defer tx.Rollback()
 	r := snapshotReader{ctx: ctx, tx: tx, q: q}
 	for _, step := range []func(*DashboardSnapshot) error{
-		r.agent, r.actions, r.wakes, r.toolCalls, r.trends, r.spend, r.metrics,
+		r.agent, r.actions, r.wakes, r.toolCalls, r.trends, r.spend, r.metrics, r.accountDays,
 	} {
 		if err = step(&snap); err != nil {
 			return DashboardSnapshot{}, fmt.Errorf("reading dashboard snapshot: %w", err)
@@ -374,6 +387,22 @@ func (r snapshotReader) metrics(snap *DashboardSnapshot) error {
 		}
 		m.MeasuredAt = stamp(at)
 		snap.Metrics = append(snap.Metrics, m)
+	}
+	return rows.Err()
+}
+
+func (r snapshotReader) accountDays(snap *DashboardSnapshot) error {
+	rows, err := r.rows(`SELECT day,account_views,attributed FROM account_reconciliation WHERE agent_id=? ORDER BY day DESC LIMIT ?`, r.q.AgentID, snapshotAccountDays)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d DashboardAccountDay
+		if err = rows.Scan(&d.Day, &d.Views, &d.Attributed); err != nil {
+			return err
+		}
+		snap.AccountDays = append(snap.AccountDays, d)
 	}
 	return rows.Err()
 }

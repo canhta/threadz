@@ -223,7 +223,7 @@ func seed(ctx context.Context, s *store.Store, now time.Time) error {
 				must(s.RecordTrendStories(ctx, agent, stories, t, 10))
 				trendDay++
 			}
-			must(s.RecordFollowers(ctx, agent, followersAt(t), t))
+			must(s.RecordFollowers(ctx, agent, followersAt(t), "followers_browser", t))
 			if postAt[i] {
 				idx := postCount
 				postCount++
@@ -308,7 +308,7 @@ func seed(ctx context.Context, s *store.Store, now time.Time) error {
 		_, err = s.CompleteMetricJobs(ctx, jobs, at, store.MetricValues{Views: sc(r.views), Likes: sc(r.likes), Replies: sc(r.replies), Reposts: sc(r.reposts), Followers: &f})
 		must(err)
 	}
-	must(s.RecordFollowers(ctx, agent, followersAt(now), now))
+	must(s.RecordFollowers(ctx, agent, followersAt(now), "followers_browser", now))
 	must(s.SetNextWake(ctx, agent, now.Add(2*time.Hour)))
 	return nil
 }

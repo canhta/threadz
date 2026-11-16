@@ -1,6 +1,6 @@
 # Data: which tables exist, how long is each kept, and what is stored about a Threads user?
 
-The whole schema is [`internal/store/schema.sql`](../internal/store/schema.sql); read columns, checks and indexes there. It is applied to an empty database by `store.Open` and stamped with `PRAGMA user_version` (currently 13, the `schemaVersion` constant in `internal/store/store.go`). A database with any other version is refused with a message to start a fresh file; there is no in-place upgrade. A schema change edits `schema.sql` and raises the version constant. Every table carries `agent_id`, even while only one agent runs.
+The whole schema is [`internal/store/schema.sql`](../internal/store/schema.sql); read columns, checks and indexes there. It is applied to an empty database by `store.Open` and stamped with `PRAGMA user_version` (currently 14, the `schemaVersion` constant in `internal/store/store.go`). A database with any other version is refused with a message to start a fresh file; there is no in-place upgrade. A schema change edits `schema.sql` and raises the version constant. Every table carries `agent_id`, even while only one agent runs.
 
 ## Tables
 
@@ -17,7 +17,10 @@ The whole schema is [`internal/store/schema.sql`](../internal/store/schema.sql);
 | `action_parts` | Later parts (2 to 5) of a series: text, `thread_url`, `media_id`. A part with an empty `thread_url` was never published | Dispatcher |
 | `metric_jobs` | Durable +1h/+6h/+24h targets: lease, fence, attempts, `completed_at`, `reason` | Metrics |
 | `metrics` | Repeated measurements per action (views, likes, replies, reposts, quotes, shares, followers, `author_replied`; the last four nullable) | Metrics |
-| `account_followers` | Latest own follower count per agent, read from the own profile page at the start of each agent wake; a metrics batch stamps its samples with this row | `read_own_metrics` |
+| `account_followers` | Latest own follower count per agent, read from the own profile page at the start of each agent wake, and its `source` (`followers_browser` or `followers_api_fallback`); a metrics batch stamps its samples with this row | `read_own_metrics` |
+| `account_samples` | One row per account insights read of a window total (`metric`, `since`, `until`, `value`, `source`); append only, skipped when equal to the previous row of the same metric and window ([threads.md](threads.md#account-insights)) | Metrics |
+| `account_daily` | The account `views` per Pacific day (`day`), with `value` NULL when the API returned no bucket, `settled` once read 3 days after the day closed, the day's UTC bounds and `fetched_at`; upserted from the trailing 3 days of each read | Metrics |
+| `account_reconciliation` | A view, not a table: each `account_daily` day's `account_views`, the `attributed` views its own actions gained that day from `metrics`, and the `residual` | none |
 | `contacts` | Username, `reply_count_7d`, `do_not_contact`, `reason`. Rate limiting only; no description of the person | Guard |
 | `ledger_phases` | The only spend record: per agent, local day (date in `schedule.timezone`) and phase (`agent`, `dream`, `critic`), token and USD totals. A daily total is a SUM over phases | LLM client |
 | `trend_stories` | Ranked external stories from `fetch_trends` | Trends |
@@ -42,9 +45,10 @@ The whole schema is [`internal/store/schema.sql`](../internal/store/schema.sql);
 | `wakes` | 90 days after they ended; a running wake is never pruned |
 | `owner_msgs` | 90 days |
 | `webhook_events` | 30 days |
+| `account_samples` | 30 days |
 | `contacts` | Rows with `do_not_contact = 0` until no reply to that username falls in the last 7 days; `do_not_contact` rows forever |
 
-`actions`, `metrics`, completed `metric_jobs` (an episode is a completed job joined to its metrics) and `ledger_phases` are the experiment's record and are kept. A dashboard panel never shows more days than its table keeps: the trending panel shows at most 7 days whatever range is selected.
+`actions`, `metrics`, completed `metric_jobs` (an episode is a completed job joined to its metrics), `ledger_phases` and `account_daily` are the experiment's record and are kept. A dashboard panel never shows more days than its table keeps: the trending panel shows at most 7 days whatever range is selected.
 
 ## What is stored about a Threads user
 

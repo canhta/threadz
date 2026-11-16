@@ -58,6 +58,7 @@ var ageCases = []ageCase{
 	{"wakes", `INSERT INTO wakes(agent_id,started_at,ended_at) VALUES(?,'2000-01-01T00:00:00Z',?)`, `SELECT COUNT(*) FROM wakes WHERE agent_id=?`, 90 * 24 * time.Hour},
 	{"owner_msgs", `INSERT INTO owner_msgs(agent_id,direction,text,at) VALUES(?,'in','x',?)`, `SELECT COUNT(*) FROM owner_msgs WHERE agent_id=?`, 90 * 24 * time.Hour},
 	{"seen_posts", `INSERT INTO seen_posts(agent_id,url,author,text,read_at) VALUES(?,'https://threads.com/@x/post/'||hex(randomblob(4)),'x','t',?)`, `SELECT COUNT(*) FROM seen_posts WHERE agent_id=?`, 7 * 24 * time.Hour},
+	{"account_samples", `INSERT INTO account_samples(agent_id,measured_at,metric,since,until,value,source) VALUES(?,?,'likes','s','u',1,'api')`, `SELECT COUNT(*) FROM account_samples WHERE agent_id=?`, 30 * 24 * time.Hour},
 	{"webhook_events", `INSERT INTO webhook_events(agent_id,field,object_id,at) VALUES(?,'replies',(SELECT COUNT(*)+1 FROM webhook_events),?)`, `SELECT COUNT(*) FROM webhook_events WHERE agent_id=?`, 30 * 24 * time.Hour},
 }
 

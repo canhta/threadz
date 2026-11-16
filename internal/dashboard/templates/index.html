@@ -92,6 +92,7 @@
         {{with index .KPIs 3}}<div><dt>Posts</dt><dd>{{.Value}}</dd></div>{{end}}
         {{with index .KPIs 4}}<div><dt>Replies sent</dt><dd>{{.Value}}</dd></div>{{end}}
       </dl>
+      {{if .Growth.Reconciliation}}<p class="foot">{{.Growth.Reconciliation}}</p>{{end}}
       <p class="foot">Stats read {{tm "clock" .Growth.MeasuredAt .Growth.LastMeasured}}</p>
       {{else}}
       <p class="empty">{{.Growth.EmptyText}}</p>

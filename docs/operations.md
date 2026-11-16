@@ -136,9 +136,9 @@ Sections run in this order; missing values show `—`.
 | Section | Shows |
 |---|---|
 | Top bar | Agent, status, test mode, last and next run in the owner's zone (`telegram.timezone`, else schedule zone, else UTC), range links |
-| KPI cells | Posts, replies, followers with change, views with change against the previous period, spend today against the daily limit. Counts cover every real publication under the agent's own username, from a SQL aggregate, never truncated |
+| KPI cells | Posts, replies, followers with change, views (the sum of the account's daily views, `account_daily`) with change against the previous period, spend today against the daily limit. Counts cover every real publication under the agent's own username, from a SQL aggregate, never truncated |
 | Posts | Own posts and replies ranked by engagement: text linked to the post, age, best/worst mark, Deleted label, views, likes, replies, reposts, engagement rate; blocked posts counted by rule. |
-| Growth | Inline-SVG charts of views, engagement rate and followers per day; changes against the previous period; followers per post and per 1,000 views |
+| Growth | Inline-SVG charts of views (account daily views; a day without a value is a gap), engagement rate and followers per day; a line of how many of the range's views the agent's own posts and replies gained ([threads.md](threads.md#account-insights)); changes against the previous period; followers per post and per 1,000 views |
 | Cost | Stacked daily spend by runs and planning against the daily limit |
 | Unit cost | Total spent and cost per post, follower and 1,000 views; `$0.04`, `<$0.01` below a cent |
 | Tools | Ok, failed and blocked counts per tool |
@@ -159,16 +159,15 @@ Sections run in this order; missing values show `—`.
 
 `threadz update` (root) installs a GitHub release only after the tarball's sha256 and detached ed25519 signature verify against `update.ReleasePublicKey`. It refuses a downgrade, a major-version jump and release notes with a `Manual step:` line, and restores `.prev` when the restarted unit is not active and `ctl doctor` does not pass within 2 minutes. `THREADZ_UPDATE_AUTO` (default false) and `THREADZ_UPDATE_WINDOW` (local hours `H-H`) gate only the timer; Telegram `/update` and `ctl update` write `/run/threadz/update-request` for a root path unit. Steps, flags and install: [setup.md](setup.md#updates).
 
-## Manual deploy of v0.3.0
+## Manual deploy of a schema change
 
-v0.3.0 changes the schema (v12 to v13) and the tool surface, so its release notes carry a `Manual step:` line and `threadz update` refuses it. Install by hand, in this order:
+A release that changes the schema (here v13 to v14) carries a `Manual step:` line in its release notes and `threadz update` refuses it. Install by hand, in this order:
 
 1. Stop both services: `systemctl stop threadz threadz-dashboard`. The dashboard runs the same binary on the same database.
-2. Back up the database and the yaml: `cp /opt/threadz/data/threadz.db /opt/threadz/data/threadz.db.v12` and `cp /opt/threadz/agents/viral.agent.yaml /opt/threadz/agents/viral.agent.yaml.v12`.
-3. Migrate the database (one transaction, refuses any schema other than v12; it adds the `seen_posts` table, renames `actions.trend_ref` to `trend`, drops `actions.topic_heat` and rewrites `threads.net` and `www.` hosts in stored Threads URLs to `threads.com`; it needs sqlite3 3.35 or later for DROP COLUMN, check with `sqlite3 --version`): `sqlite3 -bail /opt/threadz/data/threadz.db < deploy/migrate-13.sql`
-4. Patch the live template (rewrites the sentences that name a removed tool or argument, then replaces the whole `persona:` block with the repo template's, but only when the live block is exactly the v0.2.x repo persona (sha256); an edited persona is kept with a warning to merge by hand. Writes a `.bak`, prints each change, never touches `dry_run`; a second run changes nothing): `python3 deploy/patch-template-v13.py /opt/threadz/agents/viral.agent.yaml` (run it from the repo checkout: it reads `templates/viral.agent.yaml`)
-5. Install the v0.3.0 binary over `/opt/threadz/threadz`.
-6. Check with the service env: `set -a; . /etc/threadz/threadz.env; set +a; /opt/threadz/threadz check --agents /opt/threadz/agents --db /opt/threadz/data/threadz.db`
-7. Start the services: `systemctl start threadz`, then `systemctl start threadz-dashboard`, then `threadz ctl doctor`.
+2. Back up the database: `cp /opt/threadz/data/threadz.db /opt/threadz/data/threadz.db.v13`.
+3. Migrate the database (one transaction, refuses any schema other than v13; it adds the `account_samples` and `account_daily` tables, the `account_reconciliation` view and `account_followers.source`, and changes no row): `sqlite3 -bail /opt/threadz/data/threadz.db < deploy/migrate-14.sql`
+4. Install the new binary over `/opt/threadz/threadz`.
+5. Check with the service env: `set -a; . /etc/threadz/threadz.env; set +a; /opt/threadz/threadz check --agents /opt/threadz/agents --db /opt/threadz/data/threadz.db`
+6. Start the services: `systemctl start threadz`, then `systemctl start threadz-dashboard`, then `threadz ctl doctor`.
 
-To roll back, stop both services and restore the database backup over the migrated one (the migration drops a column and rewrites URLs, so it has no inverse): `cp /opt/threadz/data/threadz.db.v12 /opt/threadz/data/threadz.db`. Then restore `viral.agent.yaml.v12` over the patched yaml, install the previous binary and start the services as in step 7.
+To roll back, stop both services, restore the database backup over the migrated one (the previous binary refuses a v14 database): `cp /opt/threadz/data/threadz.db.v13 /opt/threadz/data/threadz.db`, install the previous binary and start the services as in step 6.

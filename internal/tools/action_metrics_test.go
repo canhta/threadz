@@ -78,6 +78,39 @@ func TestReadOwnMetricsIsAHarnessReadTheModelCannotCall(t *testing.T) {
 	}
 }
 
+func TestReadAccountInsightsIsAHarnessReadOfTheClosedPacificDays(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	for _, tool := range h.dispatch.Definitions() {
+		if tool.Function.Name == "read_account_insights" {
+			t.Fatal("read_account_insights is offered to the model")
+		}
+	}
+	if _, err := h.dispatch.Dispatch(context.Background(), llm.ToolCall{ID: "model-call", Type: "function", Function: llm.CallFunction{Name: "read_account_insights", Arguments: `{"days":3}`}}); !errors.Is(err, guard.ErrBlocked) {
+		t.Fatalf("a model call to a harness read: %v", err)
+	}
+	if _, err := h.call("read_account_insights", `{}`); err == nil {
+		t.Fatal("a read without days was served")
+	}
+
+	h.backend.Account = threads.AccountInsights{Totals: map[string]int64{"likes": 5}}
+	h.next()
+	out, err := h.call("read_account_insights", `{"days":3}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got threads.AccountInsights
+	if err := json.Unmarshal(decodeBrowserEnvelope(t, out).Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	since, until := threads.AccountWindow(h.now, 3)
+	if !got.Since.Equal(since) || !got.Until.Equal(until) || got.Totals["likes"] != 5 {
+		t.Fatalf("account insights = %+v, want window %s..%s", got, since, until)
+	}
+	if n := h.backend.Count(threads.OpReadAccountInsights); n != 1 {
+		t.Fatalf("backend reads = %d", n)
+	}
+}
+
 func TestActionScopedReadBindsOwnURLAndReturnsActionIdentity(t *testing.T) {
 	const (
 		agentID   = "agent"

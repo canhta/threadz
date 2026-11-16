@@ -25,6 +25,17 @@ const (
 	DefaultLeaseDuration = 5 * time.Minute
 	DefaultRetryDelay    = 5 * time.Minute
 	DefaultBatchSize     = 10
+
+	// AccountPollEvery is the period of the account insights read: the series
+	// only changes when a Pacific day closes, so a shorter period gains nothing.
+	AccountPollEvery = time.Hour
+	// accountCloseDelay is how long after a Pacific midnight the closing read is made.
+	accountCloseDelay = 5 * time.Minute
+	// accountBackoffSteps caps the doubling of RetryDelay after failed account reads.
+	accountBackoffSteps = 4
+
+	accountSource     = "api"
+	reasonAccountRead = "account_insights_stored"
 )
 
 type Options struct {
@@ -45,10 +56,17 @@ type Result struct {
 	ClaimedJobs  int `json:"claimed_jobs"`
 	Samples      int `json:"samples"`
 	DeferredJobs int `json:"deferred_jobs"`
+	// AccountReads is 1 when this run stored an account insights read.
+	AccountReads int `json:"account_reads"`
 }
 type Processor struct {
 	mu   sync.Mutex
 	opts Options
+
+	accountMu       sync.Mutex
+	accountLast     time.Time
+	accountBackoff  time.Time
+	accountFailures int
 }
 
 func New(opts Options) (*Processor, error) {
@@ -97,7 +115,13 @@ func (p *Processor) NextDue(ctx context.Context) (time.Time, bool, error) {
 		p.emit(ctx, logging.Record{Event: logging.MetricsScheduled, Outcome: "success", Reason: "targets_seeded", Jobs: count})
 	}
 	at, ok, err := p.opts.Store.NextMetricDue(ctx, p.opts.Template.ID)
-	return at, ok, metricError("reading next metric target", err)
+	if err != nil {
+		return at, ok, metricError("reading next metric target", err)
+	}
+	if due, enabled := p.accountDue(p.opts.Now()); enabled && (!ok || due.Before(at)) {
+		at, ok = due, true
+	}
+	return at, ok, nil
 }
 
 // RunDue leases at most BatchSize action groups. Each group has one guarded
@@ -128,10 +152,11 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 		return result, metricError("starting metric wake", err)
 	}
 	endReason := "completed"
+	accountDue := false
 	defer func() {
 		finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if runErr == nil && result.ClaimedJobs == 0 {
+		if runErr == nil && result.ClaimedJobs == 0 && !accountDue {
 			// Nothing was due after all: leave no wake row behind.
 			runErr = metricError("dropping empty metric wake", p.opts.Store.DeleteMetricWake(finalCtx, wakeID))
 			return
@@ -153,7 +178,10 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 		return result, metricError("claiming metric targets", err)
 	}
 	result.ClaimedJobs = len(jobs)
-	if len(jobs) == 0 {
+	if due, enabled := p.accountDue(p.opts.Now()); enabled && !due.After(p.opts.Now()) {
+		accountDue = true
+	}
+	if len(jobs) == 0 && !accountDue {
 		return result, nil
 	}
 	groups := groupJobs(jobs)
@@ -186,6 +214,9 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return result, metricError("opening metric source", safeContextError(err))
 		}
+		if accountDue {
+			p.accountFailed(p.opts.Now(), err)
+		}
 		for _, group := range groups {
 			if e := p.deferJobs(ctx, wakeID, group, "source_unavailable"); e != nil {
 				return result, e
@@ -207,6 +238,11 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	dispatcher, err := tools.NewDispatcher(tools.Options{Scope: guard.Scope{Store: p.opts.Store, Template: p.opts.Template, WakeID: wakeID, Now: p.opts.Now, Logger: p.opts.Logger, AllowLive: true}, Threads: backend, Owner: p.opts.Owner, Redactor: p.opts.Redactor, FetchTrends: p.opts.FetchTrends, SearchWeb: p.opts.SearchWeb})
 	if err != nil {
 		return result, metricError("configuring metric tools", err)
+	}
+	if accountDue {
+		if err := p.readAccount(ctx, dispatcher, wakeID, &result); err != nil {
+			return result, err
+		}
 	}
 	// Agent wakes read the follower count from the profile page and record it;
 	// a batch stamps the newest one rather than opening the browser again.

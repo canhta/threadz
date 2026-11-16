@@ -61,7 +61,7 @@ func TestPageProjectsOnlySelectedSafeMetadata(t *testing.T) {
 	if page.Growth == nil || len(page.Growth.Posts) != 1 || page.Growth.Posts[0].URL != "https://www.threads.net/@own_alpha/post/ABC123" {
 		t.Fatalf("post projection: %+v", page.Growth)
 	}
-	if page.Growth.Views != 300 || page.Growth.Likes != 30 || page.Growth.Replies != 6 || page.Growth.Reposts != 2 {
+	if page.Growth.HasViews || page.KPIs[0].Value != "—" || page.Growth.Likes != 30 || page.Growth.Replies != 6 || page.Growth.Reposts != 2 {
 		t.Fatalf("growth totals: %+v", page.Growth)
 	}
 	if page.Growth.Rate != "12.7%" {
@@ -367,7 +367,7 @@ func TestSamplesOutsideTheRangeStillFeedTheRankedList(t *testing.T) {
 		sample(1, ago(time.Hour), 9, 0, 0, 0),
 	}
 	page := mustPage(t, newHandler(newSource(snap)))
-	if page.Growth.Views != 50 {
+	if page.Growth.Likes != 5 {
 		t.Fatalf("range totals counted older posts: %+v", page.Growth)
 	}
 	if len(page.Growth.Posts) != 3 || page.Growth.Unmeasured != 0 {

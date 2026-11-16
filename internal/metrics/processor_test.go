@@ -68,7 +68,7 @@ func TestProcessorThreeWindowsAndCatchupUseActualObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The batch stamps the follower count an agent wake recorded; it reads none itself.
-	if err = st.RecordFollowers(ctx, tmpl.ID, 7, start); err != nil {
+	if err = st.RecordFollowers(ctx, tmpl.ID, 7, "followers_browser", start); err != nil {
 		t.Fatal(err)
 	}
 	source := processorSource()

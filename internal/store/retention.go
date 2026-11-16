@@ -42,6 +42,7 @@ var retention = []retentionPolicy{
 	{table: "wakes", ageCol: "ended_at", maxAge: 90 * day},
 	{table: "owner_msgs", ageCol: "at", maxAge: 90 * day},
 	{table: "webhook_events", ageCol: "at", maxAge: 30 * day},
+	{table: "account_samples", ageCol: "measured_at", maxAge: 30 * day},
 }
 
 // RetentionAge reports how long table keeps rows. ok is false for a table

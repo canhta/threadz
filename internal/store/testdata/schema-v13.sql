@@ -16,7 +16,6 @@ CREATE TABLE actions (
     thread_url TEXT NOT NULL DEFAULT '',
     target_score_json TEXT NOT NULL DEFAULT '',
     media_id TEXT NOT NULL DEFAULT '',
-    topic_heat REAL CHECK (topic_heat IS NULL OR (topic_heat >= 0 AND topic_heat <= 1)),
     followers_at_post INTEGER CHECK (followers_at_post IS NULL OR followers_at_post >= 0),
     parent_replies INTEGER CHECK (parent_replies IS NULL OR parent_replies >= 0),
     parent_age_minutes INTEGER CHECK (parent_age_minutes IS NULL OR parent_age_minutes >= 0),
@@ -24,7 +23,7 @@ CREATE TABLE actions (
     rationale TEXT NOT NULL DEFAULT '',
     failed INTEGER NOT NULL DEFAULT 0 CHECK (failed IN (0, 1)),
     browser INTEGER NOT NULL DEFAULT 0 CHECK (browser IN (0, 1)),
-    trend_ref TEXT NOT NULL DEFAULT '',
+    trend TEXT NOT NULL DEFAULT '',
     answers_note INTEGER NOT NULL DEFAULT 0,
     critic_json TEXT NOT NULL DEFAULT '',
     root_url TEXT NOT NULL DEFAULT '',
@@ -183,6 +182,19 @@ CREATE TABLE trend_stories (
     score INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE seen_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    media_id TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL,
+    text TEXT NOT NULL,
+    likes INTEGER,
+    replies INTEGER,
+    age_minutes INTEGER,
+    read_at TEXT NOT NULL
+);
+
 CREATE TABLE wake_transcripts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
@@ -244,3 +256,7 @@ CREATE INDEX wake_transcripts_agent ON wake_transcripts(agent_id, wake_id);
 CREATE UNIQUE INDEX wake_transcripts_seq ON wake_transcripts(wake_id, seq);
 
 CREATE UNIQUE INDEX wakes_phase_key ON wakes(agent_id,kind,phase_key) WHERE phase_key <> '';
+
+CREATE UNIQUE INDEX seen_posts_url ON seen_posts(agent_id,url);
+
+CREATE INDEX seen_posts_recent ON seen_posts(agent_id,read_at DESC);

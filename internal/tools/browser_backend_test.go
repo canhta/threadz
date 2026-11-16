@@ -152,7 +152,7 @@ func newBrowserHarnessWithLogger(t *testing.T, dryRun bool, logger *slog.Logger,
 func (h *browserHarness) call(name, args string) (string, error) {
 	h.calls++
 	run := h.dispatch.Dispatch
-	if name == "read_own_metrics" {
+	if name == "read_own_metrics" || name == "read_account_insights" {
 		run = h.dispatch.DispatchHarness
 	}
 	return run(context.Background(), llm.ToolCall{

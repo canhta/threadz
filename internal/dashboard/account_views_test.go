@@ -1,0 +1,83 @@
+package dashboard_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/canhta/threadz/internal/store"
+)
+
+func accountDay(day string, views *int64, attributed int64) store.DashboardAccountDay {
+	return store.DashboardAccountDay{Day: day, Views: views, Attributed: attributed}
+}
+
+func n64(n int64) *int64 { return &n }
+
+// accountSnapshot is measured() with the account series of the 7 days to
+// 2026-11-12 (today, whose Pacific day has not closed) and the 7 before.
+func accountSnapshot() store.DashboardSnapshot {
+	s := measured()
+	s.AccountDays = []store.DashboardAccountDay{
+		accountDay("2026-11-11", n64(600), 60),
+		accountDay("2026-11-10", n64(500), 50),
+		accountDay("2026-11-09", n64(400), 40),
+		accountDay("2026-11-08", nil, 0),
+		accountDay("2026-11-07", n64(200), 20),
+		accountDay("2026-11-06", n64(100), 10),
+		accountDay("2026-11-04", n64(50), 5),
+		accountDay("2026-11-03", n64(50), 5),
+		accountDay("2026-11-02", n64(50), 5),
+	}
+	return s
+}
+
+func TestAccountViewsHeadlineIsTheSumOfTheAccountDays(t *testing.T) {
+	page := mustPage(t, newHandler(newSource(accountSnapshot())))
+	g := page.Growth
+	// 100+200+400+500+600: the NULL day and today add nothing, and the own
+	// actions' samples (300 views gained) are not the headline.
+	if !g.HasViews || g.Views != 1800 {
+		t.Fatalf("headline views = %d (has %v), want the sum 1800 of the account days", g.Views, g.HasViews)
+	}
+	if page.KPIs[0].Label != "Views in 7 days" || page.KPIs[0].Value != "1,800" {
+		t.Fatalf("headline KPI = %+v", page.KPIs[0])
+	}
+	if g.ViewsDelta != "up 1100% on the previous 7 days" {
+		t.Fatalf("delta = %q, want against the prior 7 days (150)", g.ViewsDelta)
+	}
+	if want := "180 of the 1,800 views came from your own posts and replies (10.0%)"; g.Reconciliation != want {
+		t.Fatalf("reconciliation = %q, want %q", g.Reconciliation, want)
+	}
+	// The chart has a point per day; a NULL day is a gap, never a zero.
+	var cells []string
+	for _, row := range g.ViewsChart.Rows {
+		cells = append(cells, row[1])
+	}
+	if got := strings.Join(cells, ","); got != "100,200,—,400,500,600,—" {
+		t.Fatalf("chart cells = %s", got)
+	}
+	if g.Likes != 30 || len(g.Posts) != 1 || g.Posts[0].Views != "400" {
+		t.Fatalf("per-post rows and engagement still come from the own actions: %+v", g)
+	}
+}
+
+func TestAccountViewsWithoutAPriorPeriodOrAnyViews(t *testing.T) {
+	s := accountSnapshot()
+	s.AccountDays = s.AccountDays[:6]
+	page := mustPage(t, newHandler(newSource(s)))
+	if page.Growth.Views != 1800 || page.Growth.ViewsDelta != "" {
+		t.Fatalf("without a prior period: views %d delta %q", page.Growth.Views, page.Growth.ViewsDelta)
+	}
+
+	s.AccountDays = []store.DashboardAccountDay{accountDay("2026-11-11", n64(0), 0), accountDay("2026-11-10", nil, 0)}
+	page = mustPage(t, newHandler(newSource(s)))
+	if !page.Growth.HasViews || page.Growth.Views != 0 || page.Growth.Reconciliation != "" || page.KPIs[0].Value != "0" {
+		t.Fatalf("a day with 0 views: %+v", page.Growth)
+	}
+
+	s.AccountDays = []store.DashboardAccountDay{accountDay("2026-11-11", nil, 0)}
+	page = mustPage(t, newHandler(newSource(s)))
+	if page.Growth.HasViews || page.KPIs[0].Value != "—" {
+		t.Fatalf("only missing days must show no figure: %+v", page.KPIs[0])
+	}
+}

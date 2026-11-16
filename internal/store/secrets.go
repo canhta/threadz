@@ -35,9 +35,9 @@ func (s *Store) PutSecret(ctx context.Context, agentID, name string, sealed []by
 	return nil
 }
 
-// RecordFollowers stores the agent's latest own follower count.
-func (s *Store) RecordFollowers(ctx context.Context, agentID string, followers int64, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO account_followers(agent_id, followers, at) VALUES(?,?,?) ON CONFLICT(agent_id) DO UPDATE SET followers=excluded.followers, at=excluded.at`, agentID, followers, at.UTC().Format(time.RFC3339Nano))
+// RecordFollowers stores the agent's latest own follower count and where it was read.
+func (s *Store) RecordFollowers(ctx context.Context, agentID string, followers int64, source string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO account_followers(agent_id, followers, at, source) VALUES(?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET followers=excluded.followers, at=excluded.at, source=excluded.source`, agentID, followers, at.UTC().Format(time.RFC3339Nano), source)
 	if err != nil {
 		return fmt.Errorf("recording followers: %w", err)
 	}

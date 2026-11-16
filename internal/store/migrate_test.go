@@ -13,20 +13,21 @@ import (
 )
 
 // shape is the structure of a database: every table with its columns, every
-// index and every trigger. CREATE text is compared only for indexes and
-// triggers, which the migration creates verbatim; tables are compared by
+// index, trigger and view. CREATE text is compared only for indexes, triggers
+// and views, which the migration creates verbatim; tables are compared by
 // pragma, because ALTER TABLE rewrites their text.
 type shape struct {
 	Tables   map[string][]string
 	Indexes  map[string]string
 	Triggers map[string]string
+	Views    map[string]string
 }
 
 var spaces = regexp.MustCompile(`\s+`)
 
 func readShape(t *testing.T, db *sql.DB) shape {
 	t.Helper()
-	s := shape{Tables: map[string][]string{}, Indexes: map[string]string{}, Triggers: map[string]string{}}
+	s := shape{Tables: map[string][]string{}, Indexes: map[string]string{}, Triggers: map[string]string{}, Views: map[string]string{}}
 	rows, err := db.Query(`SELECT type,name,COALESCE(sql,'') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +63,8 @@ func readShape(t *testing.T, db *sql.DB) shape {
 			s.Indexes[o.name] = text
 		case "trigger":
 			s.Triggers[o.name] = text
+		case "view":
+			s.Views[o.name] = text
 		}
 	}
 	return s
@@ -85,68 +88,46 @@ func buildSchema(t *testing.T, file string, version int) *sql.DB {
 	return db
 }
 
-func TestMigrate13MatchesFreshSchema(t *testing.T) {
+func TestMigrate14MatchesFreshSchema(t *testing.T) {
 	ctx := context.Background()
-	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-13.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-14.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := buildSchema(t, "schema-v12.sql", 12)
+	old := buildSchema(t, "schema-v13.sql", 13)
 	defer old.Close()
 	if _, err = old.ExecContext(ctx, `
 		INSERT INTO agents(id,status) VALUES('a','running');
-		INSERT INTO actions(id,agent_id,kind,text,posted_at) VALUES(1,'a','post','hello','2026-11-01T00:00:00Z');
-		INSERT INTO actions(id,agent_id,kind,text,posted_at,target_url,thread_url,root_url) VALUES(2,'a','reply','old host','2026-11-01T00:00:00Z',
-			'https://www.threads.net/@x/post/1','http://threads.net/@y/post/2','https://threads.net/@x/post/1');
-		INSERT INTO actions(id,agent_id,kind,text,posted_at,target_url) VALUES(3,'a','reply','other host','2026-11-01T00:00:00Z','https://graph.threads.net/v1.0/x');
-		INSERT INTO action_parts(agent_id,action_id,part,text,thread_url) VALUES('a',2,2,'part','https://threads.net/@y/post/3?x=1');`); err != nil {
-		t.Fatalf("seeding v12: %v", err)
+		INSERT INTO account_followers(agent_id,followers,at) VALUES('a',7,'2026-11-01T00:00:00Z');`); err != nil {
+		t.Fatalf("seeding v13: %v", err)
 	}
 	if _, err = old.ExecContext(ctx, string(migration)); err != nil {
-		t.Fatalf("applying migrate-13.sql: %v", err)
+		t.Fatalf("applying migrate-14.sql: %v", err)
 	}
-	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "v13.db"))
+	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "v14.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fresh.Close()
 	if want, got := readShape(t, fresh.db), readShape(t, old); !reflect.DeepEqual(want, got) {
-		t.Fatalf("migrated schema differs from a fresh v13 schema\nfresh:    %+v\nmigrated: %+v", want, got)
+		t.Fatalf("migrated schema differs from a fresh v14 schema\nfresh:    %+v\nmigrated: %+v", want, got)
 	}
 	var version int
 	if err = old.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 		t.Fatalf("user_version = %d, %v; want %d", version, err, schemaVersion)
 	}
-	// Existing rows stay and the new table takes rows; a URL keeps one id per agent.
-	var actions int
-	if err = old.QueryRow(`SELECT COUNT(*) FROM actions`).Scan(&actions); err != nil || actions != 3 {
-		t.Errorf("actions after migration = %d, %v; want 3", actions, err)
+	var followers int
+	var source string
+	if err = old.QueryRow(`SELECT followers,source FROM account_followers WHERE agent_id='a'`).Scan(&followers, &source); err != nil || followers != 7 || source != "" {
+		t.Errorf("follower row after migration = %d %q, %v; want 7 and an empty source", followers, source, err)
 	}
-	// Stored Threads URLs take the canonical host, so SQL matches on root_url
-	// find them; other hosts and the paths stay.
-	for query, want := range map[string]string{
-		`SELECT target_url FROM actions WHERE id=2`:        "https://threads.com/@x/post/1",
-		`SELECT thread_url FROM actions WHERE id=2`:        "https://threads.com/@y/post/2",
-		`SELECT root_url FROM actions WHERE id=2`:          "https://threads.com/@x/post/1",
-		`SELECT target_url FROM actions WHERE id=3`:        "https://graph.threads.net/v1.0/x",
-		`SELECT thread_url FROM action_parts WHERE part=2`: "https://threads.com/@y/post/3?x=1",
-	} {
-		var got string
-		if err = old.QueryRow(query).Scan(&got); err != nil || got != want {
-			t.Errorf("%s = %q, %v; want %q", query, got, err, want)
-		}
-	}
-	insert := `INSERT INTO seen_posts(agent_id,url,author,text,read_at) VALUES('a','https://threads.com/@x/post/1','x','t','2026-11-01T00:00:00Z')`
-	if _, err = old.Exec(insert); err != nil {
-		t.Fatalf("writing seen_posts after migration: %v", err)
-	}
-	if _, err = old.Exec(insert); err == nil {
-		t.Error("seen_posts accepts the same URL twice for one agent")
+	if _, err = old.Exec(`INSERT INTO account_daily(agent_id,day,metric,value,fetched_at,starts_at,ends_at) VALUES('a','2026-11-14','views',NULL,'2026-11-16T00:00:00Z','2026-11-14T08:00:00Z','2026-11-15T08:00:00Z')`); err != nil {
+		t.Fatalf("writing account_daily after migration: %v", err)
 	}
 }
 
-func TestMigrate13RefusesOtherVersions(t *testing.T) {
-	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-13.sql"))
+func TestMigrate14RefusesOtherVersions(t *testing.T) {
+	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-14.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,10 +137,10 @@ func TestMigrate13RefusesOtherVersions(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA user_version=13`); err != nil {
+	if _, err = db.Exec(`PRAGMA user_version=14`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = db.Exec(string(migration)); err == nil {
-		t.Fatal("migration ran on a v13 database")
+		t.Fatal("migration ran on a v14 database")
 	}
 }

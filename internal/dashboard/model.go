@@ -130,28 +130,33 @@ type BurnPanel struct {
 }
 
 type GrowthPanel struct {
-	HasMetrics   bool
-	EmptyText    string
-	Views        int64
-	Likes        int64
-	Replies      int64
-	Reposts      int64
-	Rate         string
-	ViewsDelta   string
-	LikesDelta   string
-	RepliesDelta string
-	RepostsDelta string
-	RateDelta    string
-	ViewsChart   *Chart
-	RateChart    *Chart
-	Posts        []PostRow
-	Shown        int
-	Total        int
-	Top          []PostRow
-	LastMeasured string
-	MeasuredAt   time.Time
-	Unmeasured   int
-	RangeLabel   string
+	HasMetrics bool
+	// HasViews is set when the account views series has a value in the range;
+	// Views is its sum.
+	HasViews bool
+	// Reconciliation says how much of Views the agent's own actions explain.
+	Reconciliation string
+	EmptyText      string
+	Views          int64
+	Likes          int64
+	Replies        int64
+	Reposts        int64
+	Rate           string
+	ViewsDelta     string
+	LikesDelta     string
+	RepliesDelta   string
+	RepostsDelta   string
+	RateDelta      string
+	ViewsChart     *Chart
+	RateChart      *Chart
+	Posts          []PostRow
+	Shown          int
+	Total          int
+	Top            []PostRow
+	LastMeasured   string
+	MeasuredAt     time.Time
+	Unmeasured     int
+	RangeLabel     string
 }
 
 type TrendingPanel struct {

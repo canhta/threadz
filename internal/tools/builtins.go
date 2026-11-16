@@ -58,10 +58,10 @@ func (d *Dispatcher) executors() map[string]executor {
 		},
 	}
 	tools["find_posts"] = d.findPosts
-	for _, name := range []string{"profile", "read_post", "read_replies", "read_own_metrics"} {
+	for _, name := range []string{"profile", "read_post", "read_replies", "read_own_metrics", "read_account_insights"} {
 		tools[name] = func(ctx context.Context, a arguments) (any, error) {
 			data, err := d.browserRead(ctx, name, name, a)
-			if err == nil && name != "profile" && name != "read_own_metrics" {
+			if err == nil && (name == "read_post" || name == "read_replies") {
 				d.noteRead(ctx, data)
 			}
 			return data, err

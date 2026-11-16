@@ -44,6 +44,7 @@ type fakeThreads struct {
 	queries  map[string]map[string]string
 	routes   map[string][]string
 	failures map[string]int
+	headers  map[string]string
 }
 
 func newFake(t *testing.T) (*fakeThreads, *API, *int) {
@@ -77,6 +78,9 @@ func (f *fakeThreads) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.URL.String(), testToken) || r.Header.Get("Authorization") != "Bearer "+testToken {
 		f.t.Errorf("token must travel only in the Authorization header: %s", r.URL)
 	}
+	if h := f.headers[key]; h != "" {
+		w.Header().Set("X-Business-Use-Case-Usage", h)
+	}
 	files := f.routes[key]
 	if len(files) == 0 {
 		http.Error(w, string(apiFixture(f.t, "error.json")), http.StatusBadRequest)
@@ -85,7 +89,7 @@ func (f *fakeThreads) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n := f.failures[key]
 	file := files[min(n, len(files)-1)]
 	f.failures[key]++
-	if file == "error.json" {
+	if strings.HasPrefix(file, "error") {
 		w.WriteHeader(http.StatusBadRequest)
 	}
 	if strings.HasPrefix(file, "{") {

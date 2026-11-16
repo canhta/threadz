@@ -4,24 +4,26 @@ import (
 	"context"
 	"path"
 	"sync"
+	"time"
 )
 
 // Operation names key Memory.Pages, Memory.Results and Memory.Errors and
 // label Memory.Calls.
 const (
-	OpReadFeed       = "read_feed"
-	OpReadTopic      = "read_topic"
-	OpSearch         = "search"
-	OpReadPost       = "read_post"
-	OpProfile        = "profile"
-	OpProfilePosts   = "profile_posts"
-	OpReadOwnPosts   = "read_own_posts"
-	OpReadReplies    = "read_replies"
-	OpQuota          = "publishing_limit"
-	OpReadOwnMetrics = "read_own_metrics"
-	OpPost           = "post"
-	OpReply          = "reply"
-	OpClose          = "close"
+	OpReadFeed            = "read_feed"
+	OpReadTopic           = "read_topic"
+	OpSearch              = "search"
+	OpReadPost            = "read_post"
+	OpProfile             = "profile"
+	OpProfilePosts        = "profile_posts"
+	OpReadOwnPosts        = "read_own_posts"
+	OpReadReplies         = "read_replies"
+	OpQuota               = "publishing_limit"
+	OpReadOwnMetrics      = "read_own_metrics"
+	OpReadAccountInsights = "read_account_insights"
+	OpPost                = "post"
+	OpReply               = "reply"
+	OpClose               = "close"
 )
 
 // Call is one operation a Memory served: Arg is the query, URL or reply target
@@ -40,6 +42,8 @@ type Memory struct {
 	// Own answers read_own_metrics; Actions answers per-post metrics by media id
 	// and reports ErrMetricsUnavailable for an id it does not hold.
 	Own Metrics
+	// Account answers read_account_insights; its window is the one asked for.
+	Account AccountInsights
 	// Quota answers publishing_limit.
 	Quota   Quota
 	Actions map[string]Metrics
@@ -179,6 +183,14 @@ func (m *Memory) ReadOwnMetrics(ctx context.Context) (Metrics, error) {
 		return Metrics{}, err
 	}
 	return m.Own, nil
+}
+func (m *Memory) ReadAccountInsights(ctx context.Context, since, until time.Time) (AccountInsights, error) {
+	if err := m.serve(ctx, Call{Op: OpReadAccountInsights}); err != nil {
+		return AccountInsights{}, err
+	}
+	out := m.Account
+	out.Since, out.Until = since, until
+	return out, nil
 }
 func (m *Memory) ReadActionMetrics(ctx context.Context, id string) (Metrics, error) {
 	if err := m.serve(ctx, Call{Op: OpReadOwnMetrics, Arg: id}); err != nil {

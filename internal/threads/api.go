@@ -87,11 +87,18 @@ func NewAPI(o APIOptions) (*API, error) {
 // get and post return the decoded body. The token travels in a header, never
 // in a URL, so request URLs in errors and logs stay clean.
 func (a *API) do(ctx context.Context, method, path string, q url.Values, out any) error {
+	_, err := a.doHeader(ctx, method, path, q, out)
+	return err
+}
+
+// doHeader is do that also returns the response headers, which carry the usage
+// the API reports on every response, failed ones included.
+func (a *API) doHeader(ctx context.Context, method, path string, q url.Values, out any) (http.Header, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.o.Timeout)
 	defer cancel()
 	token, err := a.o.Tokens.Token(ctx)
 	if err != nil {
-		return fmt.Errorf("reading threads token: %w", err)
+		return nil, fmt.Errorf("reading threads token: %w", err)
 	}
 	u := a.o.BaseURL + path
 	if len(q) > 0 {
@@ -99,23 +106,23 @@ func (a *API) do(ctx context.Context, method, path string, q url.Values, out any
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
-		return fmt.Errorf("building threads request: %w", err)
+		return nil, fmt.Errorf("building threads request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token.Expose())
 	resp, err := a.o.HTTP.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
-		return errors.New("threads request failed")
+		return nil, errors.New("threads request failed")
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
-		return errors.New("reading threads response failed")
+		return nil, errors.New("reading threads response failed")
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e struct {
@@ -124,12 +131,12 @@ func (a *API) do(ctx context.Context, method, path string, q url.Values, out any
 			} `json:"error"`
 		}
 		_ = json.Unmarshal(body, &e)
-		return fmt.Errorf("%w: status %d code %d", ErrAPI, resp.StatusCode, e.Error.Code)
+		return resp.Header, fmt.Errorf("%w: status %d code %d", ErrAPI, resp.StatusCode, e.Error.Code)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("%w: malformed response", ErrAPI)
+		return resp.Header, fmt.Errorf("%w: malformed response", ErrAPI)
 	}
-	return nil
+	return resp.Header, nil
 }
 
 type apiPost struct {
@@ -279,8 +286,13 @@ type insights struct {
 			Value int64 `json:"value"`
 		} `json:"total_value"`
 		Values []struct {
-			Value int64 `json:"value"`
+			Value   int64  `json:"value"`
+			EndTime string `json:"end_time"`
 		} `json:"values"`
+		LinkTotals []struct {
+			Value int64  `json:"value"`
+			URL   string `json:"link_url"`
+		} `json:"link_total_values"`
 	} `json:"data"`
 }
 

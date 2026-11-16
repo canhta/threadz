@@ -221,7 +221,7 @@ func buildPage(snap store.DashboardSnapshot, agents []Agent, a Agent, days int, 
 	if err != nil {
 		return Page{}, err
 	}
-	p.Growth = buildGrowth(metrics, days, daysList, currentStart, priorStart, now, a, view)
+	p.Growth = buildGrowth(metrics, accountFrom(snap.AccountDays), days, daysList, currentStart, priorStart, now, a, view)
 	if next := view.next(p.Growth.Total); next > 0 {
 		p.MoreURL = listURL(a.ID, days, postView{order: view.order, show: next}) + "#posted-h"
 		p.MoreCount = next - p.Growth.Shown
@@ -712,7 +712,7 @@ func xLabelTimes(days []time.Time, loc *time.Location) []ChartLabel {
 	}
 }
 
-func buildGrowth(ms metricSet, days int, daysList []time.Time, currentStart, priorStart, now time.Time, a Agent, view postView) *GrowthPanel {
+func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Time, currentStart, priorStart, now time.Time, a Agent, view postView) *GrowthPanel {
 	g := &GrowthPanel{RangeLabel: "last " + countText(days, "day", "days"), HasMetrics: len(ms.all) > 0}
 	// Past a month a point per day is noise: chart one point per week.
 	step, unit, points := 1, "day", daysList
@@ -723,18 +723,30 @@ func buildGrowth(ms metricSet, days int, daysList []time.Time, currentStart, pri
 		}
 	}
 	g.ViewsChart = lineChart("views", "Views per "+unit, points, func(day time.Time) ([]*float64, []string) {
-		c := earnedBetween(ms.samples, day, day.AddDate(0, 0, step))
-		v := float64(c.Views)
-		return []*float64{&v}, []string{formatCount(c.Views)}
+		views, _, ok := acct.total(day, day.AddDate(0, 0, step))
+		if !ok {
+			return []*float64{nil}, []string{"—"}
+		}
+		v := float64(views)
+		return []*float64{&v}, []string{formatCount(views)}
 	}, func(v float64) string { return formatValue(v) }, a.Location, 10)
+
+	if views, own, ok := acct.total(currentStart, currentStart.AddDate(0, 0, days)); ok {
+		g.HasViews, g.Views = true, views
+		if prior, _, ok := acct.total(priorStart, currentStart); ok {
+			if text, ok := countDelta(views, prior, countText(days, "day", "days")); ok {
+				g.ViewsDelta = text
+			}
+		}
+		if views > 0 {
+			g.Reconciliation = fmt.Sprintf("%s of the %s views came from your own posts and replies (%s)", formatCount(own), formatCount(views), formatPercent(float64(own)/float64(views)))
+		}
+	}
 
 	if g.HasMetrics {
 		cur := earnedBetween(ms.samples, currentStart, now)
 		prior := earnedBetween(ms.samples, priorStart, currentStart)
-		g.Views, g.Likes, g.Replies, g.Reposts = cur.Views, cur.Likes, cur.Replies, cur.Reposts
-		if text, ok := countDelta(cur.Views, prior.Views, countText(days, "day", "days")); ok {
-			g.ViewsDelta = text
-		}
+		g.Likes, g.Replies, g.Reposts = cur.Likes, cur.Replies, cur.Reposts
 		g.LikesDelta = countDeltaShort(cur.Likes, prior.Likes)
 		g.RepliesDelta = countDeltaShort(cur.Replies, prior.Replies)
 		g.RepostsDelta = countDeltaShort(cur.Reposts, prior.Reposts)
@@ -929,8 +941,10 @@ type kpiInput struct {
 // then output counts, then today's spend.
 func buildKPIs(in kpiInput) []KPI {
 	views, rate, followers, viewsNote, rateNote := "—", "—", "—", "", ""
-	if in.growth.HasMetrics {
+	if in.growth.HasViews {
 		views, viewsNote = formatCount(in.growth.Views), in.growth.ViewsDelta
+	}
+	if in.growth.HasMetrics {
 		rate, rateNote = in.growth.Rate, in.growth.RateDelta
 	}
 	var change string

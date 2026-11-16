@@ -3,10 +3,42 @@ package dashboard
 import (
 	"fmt"
 	"github.com/canhta/threadz/internal/config"
+	"github.com/canhta/threadz/internal/store"
 	"math"
 	"sort"
 	"time"
 )
+
+// accountSeries is the account's daily views by Pacific date and, for each of
+// those days, the views the agent's own actions gained. A day the account has
+// no value for is absent, never 0. A dashboard day is matched to the Pacific
+// date with the same calendar date, so a schedule zone far from Pacific time
+// shifts the totals by up to a day.
+type accountSeries struct {
+	views, attributed map[string]int64
+}
+
+func accountFrom(days []store.DashboardAccountDay) accountSeries {
+	a := accountSeries{views: map[string]int64{}, attributed: map[string]int64{}}
+	for _, d := range days {
+		if d.Views != nil {
+			a.views[d.Day], a.attributed[d.Day] = *d.Views, d.Attributed
+		}
+	}
+	return a
+}
+
+// total sums the days from from up to but excluding to; ok is false when none
+// of them has a value.
+func (a accountSeries) total(from, to time.Time) (views, attributed int64, ok bool) {
+	for d := from; d.Before(to); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		if v, has := a.views[key]; has {
+			views, attributed, ok = views+v, attributed+a.attributed[key], true
+		}
+	}
+	return views, attributed, ok
+}
 
 // metricSample is one cumulative measurement of an own publication. Views and
 // engagement counters only grow, so a window is the difference between the
