@@ -80,7 +80,7 @@
       <dl class="figs">{{range slice .KPIs 0 3}}<div class="fig"><dt>{{.Label}}</dt><dd>{{.Value}}</dd>{{if .Note}}<small class="{{.Tone}}">{{template "tone" .Tone}}{{.Note}}</small>{{end}}</div>{{end}}</dl>
       {{template "chart" .Growth.ViewsChart}}
       <div class="charts">
-        {{template "chart" .Growth.RateChart}}
+        {{template "chart" .Growth.InteractionsChart}}
         {{if .Followers.HasData}}{{template "chart" .Followers.Chart}}{{end}}
       </div>
       <dl class="facts">
@@ -216,7 +216,7 @@
 </li>{{end}}
 
 {{define "post"}}<li class="post">
-  <p class="pmeta"><span class="kind">{{.Kind}}</span>{{if .Age}}<time datetime="{{iso .PostedAt}}" data-title="full" title="{{.AgeTitle}}">{{.Age}} ago</time>{{end}}{{if .Mark}}<span class="tag {{.Mark}}">{{.Mark}}</span>{{end}}{{if .Band}}<span class="tag band-{{.Band}}" title="{{.BandTitle}}">{{.Band}}</span>{{end}}{{if .Label}}<span class="tag">{{.Label}}</span>{{end}}</p>
+  <p class="pmeta"><span class="kind">{{.Kind}}</span>{{if .Age}}<time datetime="{{iso .PostedAt}}" data-title="full" title="{{.AgeTitle}}">{{.Age}} ago</time>{{end}}{{if .Band}}<span class="tag band-{{.Band}}" title="{{.BandTitle}}">{{.Band}}</span>{{end}}{{if .Label}}<span class="tag">{{.Label}}</span>{{end}}</p>
   <a class="ptext" href="{{.URL}}" rel="noreferrer noopener">{{.Link}}</a>
   {{if .HasSample}}<p class="pstats">{{template "stats" .}}</p>{{else}}<p class="sub">No stats yet</p>{{end}}
 </li>{{end}}
@@ -227,10 +227,9 @@
 {{define "i-heart"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>{{end}}
 {{define "i-reply"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>{{end}}
 {{define "i-repost"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m2 9 3-3 3 3"/><path d="M13 18H7a2 2 0 0 1-2-2V6"/><path d="m22 15-3 3-3-3"/><path d="M11 6h6a2 2 0 0 1 2 2v10"/></svg>{{end}}
-{{define "i-zap"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>{{end}}
 {{define "i-chevron"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>{{end}}
 {{define "i-up"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 7h6v6"/><path d="m22 7-8.5 8.5-5-5L2 17"/></svg>{{end}}
 {{define "i-down"}}<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 17h6v-6"/><path d="m22 17-8.5-8.5-5 5L2 7"/></svg>{{end}}
 
-{{define "stats"}}<span class="rate" title="Engagement rate">{{template "i-zap"}}<b>{{.Rate}}</b><span class="vh"> engaged</span></span><span title="Views">{{template "i-eye"}}<b>{{.Views}}</b><span class="vh"> views</span></span><span title="Likes">{{template "i-heart"}}<b>{{.Likes}}</b><span class="vh"> likes</span></span><span title="Replies">{{template "i-reply"}}<b>{{.Replies}}</b><span class="vh"> replies</span></span><span title="Reposts">{{template "i-repost"}}<b>{{.Reposts}}</b><span class="vh"> reposts</span></span>{{end}}
-{{define "stats-brief"}}<span class="rate" title="Engagement rate">{{template "i-zap"}}<b>{{.Rate}}</b><span class="vh"> engaged</span></span><span title="Views">{{template "i-eye"}}<b>{{.Views}}</b><span class="vh"> views</span></span><span title="Likes">{{template "i-heart"}}<b>{{.Likes}}</b><span class="vh"> likes</span></span><span title="Replies">{{template "i-reply"}}<b>{{.Replies}}</b><span class="vh"> replies</span></span>{{end}}
+{{define "stats"}}<span title="Views">{{template "i-eye"}}<b>{{.Views}}</b><span class="vh"> views</span></span><span title="Likes">{{template "i-heart"}}<b>{{.Likes}}</b><span class="vh"> likes</span></span><span title="Replies">{{template "i-reply"}}<b>{{.Replies}}</b><span class="vh"> replies</span></span><span title="Reposts">{{template "i-repost"}}<b>{{.Reposts}}</b><span class="vh"> reposts</span></span>{{end}}
+{{define "stats-brief"}}<span title="Views">{{template "i-eye"}}<b>{{.Views}}</b><span class="vh"> views</span></span><span title="Likes">{{template "i-heart"}}<b>{{.Likes}}</b><span class="vh"> likes</span></span><span title="Replies">{{template "i-reply"}}<b>{{.Replies}}</b><span class="vh"> replies</span></span>{{end}}

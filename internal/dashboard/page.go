@@ -77,7 +77,7 @@ var rangeDays = []int{7, 14, 30, 90}
 
 // postOrders are the accepted ?sort= values. The empty value is the default
 // (newest first) and is written "recent" in a URL so the cache key is explicit.
-var postOrders = []string{"recent", "views", "engaged"}
+var postOrders = []string{"recent", "views", "replies"}
 
 // postShows are the accepted ?show= values: the first page, then one step at a
 // time up to what the panel keeps. A request renders at most one of these, so
@@ -121,16 +121,14 @@ func (v postView) orderOr() string {
 	return v.order
 }
 
-// apply orders the ranked rows the way the reader asked. The ranking buildPosts
-// did stays untouched, so "best", "worst" and the top performers keep meaning
-// the same thing whatever order the list is in.
+// apply orders the rows the way the reader asked.
 func (v postView) apply(rows []PostRow) []PostRow {
 	out := append([]PostRow(nil), rows...)
 	switch v.orderOr() {
 	case "views":
 		sort.SliceStable(out, func(i, j int) bool { return out[i].views > out[j].views })
-	case "engaged":
-		sort.SliceStable(out, func(i, j int) bool { return out[i].rate > out[j].rate })
+	case "replies":
+		sort.SliceStable(out, func(i, j int) bool { return out[i].replies > out[j].replies })
 	default:
 		sort.SliceStable(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	}
@@ -163,7 +161,7 @@ func buildPage(snap store.DashboardSnapshot, agents []Agent, a Agent, days int, 
 		p.Ranges = append(p.Ranges, RangeLink{Label: countText(d, "day", "days"), Value: d, URL: listURL(a.ID, d, view), Current: d == days})
 	}
 	for _, o := range postOrders {
-		p.Orders = append(p.Orders, FilterLink{Label: map[string]string{"recent": "Newest", "views": "Most seen", "engaged": "Most engaged"}[o],
+		p.Orders = append(p.Orders, FilterLink{Label: map[string]string{"recent": "Latest", "views": "Most views", "replies": "Most replies"}[o],
 			URL: listURL(a.ID, days, postView{order: o, show: view.show}) + "#posted-h", Current: o == view.orderOr()})
 	}
 
@@ -744,6 +742,23 @@ func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Tim
 		}
 	}
 
+	if start, ok := acct.rangeStart(days, now); ok {
+		if n, ok := acct.totalInteractions(start, start.AddDate(0, 0, days)); ok {
+			g.HasInteractions, g.Interactions = true, n
+			if prior, ok := acct.totalInteractions(start.AddDate(0, 0, -days), start); ok {
+				g.InteractionsDelta, _ = countDelta(n, prior, countText(days, "day", "days"))
+			}
+		}
+	}
+	g.InteractionsChart = lineChart("interactions", "Interactions per "+unit, points, func(day time.Time) ([]*float64, []string) {
+		n, ok := acct.totalInteractions(day, day.AddDate(0, 0, step))
+		if !ok {
+			return []*float64{nil}, []string{"—"}
+		}
+		v := float64(n)
+		return []*float64{&v}, []string{formatCount(n)}
+	}, func(v float64) string { return formatValue(v) }, a.Location, 10)
+
 	if g.HasMetrics {
 		cur := earnedBetween(ms.samples, currentStart, now)
 		prior := earnedBetween(ms.samples, priorStart, currentStart)
@@ -751,23 +766,6 @@ func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Tim
 		g.LikesDelta = countDeltaShort(cur.Likes, prior.Likes)
 		g.RepliesDelta = countDeltaShort(cur.Replies, prior.Replies)
 		g.RepostsDelta = countDeltaShort(cur.Reposts, prior.Reposts)
-		rate, rateOK := engagementRate(cur)
-		priorRate, priorOK := engagementRate(prior)
-		g.Rate = "—"
-		if rateOK {
-			g.Rate = formatPercent(rate)
-		}
-		if text, ok := rateDelta(rate, priorRate, rateOK, priorOK, countText(days, "day", "days")); ok {
-			g.RateDelta = text
-		}
-		g.RateChart = lineChart("rate", "Engagement rate per "+unit, points, func(day time.Time) ([]*float64, []string) {
-			r, ok := engagementRate(earnedBetween(ms.samples, day, day.AddDate(0, 0, step)))
-			if !ok {
-				return []*float64{nil}, []string{"—"}
-			}
-			v := r * 100
-			return []*float64{&v}, []string{formatPercent(r)}
-		}, func(v float64) string { return formatValue(v) + "%" }, a.Location, 4)
 		g.LastMeasured = formatClock(ms.last, now, a.Location)
 		g.MeasuredAt = ms.last
 	}
@@ -778,12 +776,11 @@ func buildGrowth(ms metricSet, acct accountSeries, days int, daysList []time.Tim
 			g.Unmeasured++
 		}
 	}
-	for _, r := range rows {
-		if len(g.Top) < topPosts && r.HasSample && r.Rate != "—" && r.Rate != "0.0%" {
+	for _, r := range (postView{order: "views"}).apply(rows) {
+		if len(g.Top) < topPosts && r.HasSample && r.views > 0 {
 			g.Top = append(g.Top, r)
 		}
 	}
-	// rows are ranked by engagement; the list is the reader's own order.
 	listed := view.apply(rows)
 	g.Posts = listed[:min(view.showOr(), len(listed))]
 	g.Shown, g.Total = len(g.Posts), len(listed)
@@ -853,11 +850,7 @@ func lineGeometryWithMax(values []*float64, axisMax float64) (string, float64) {
 }
 
 func buildPosts(ms metricSet, now time.Time, loc *time.Location) []PostRow {
-	type ranked struct {
-		row  PostRow
-		rate float64
-	}
-	posts := make([]ranked, 0, len(ms.posts))
+	rows := make([]PostRow, 0, len(ms.posts))
 	for _, p := range ms.posts {
 		row := PostRow{ID: p.ID, URL: p.URL, Kind: kindWord(p.Kind), Link: cmp.Or(truncate(strings.Join(strings.Fields(p.pub.Text), " "), postChars), "Open on Threads")}
 		if p.pub.Deleted {
@@ -874,7 +867,7 @@ func buildPosts(ms metricSet, now time.Time, loc *time.Location) []PostRow {
 		}
 		samples := ms.all[p.ID]
 		if len(samples) == 0 {
-			posts = append(posts, ranked{row: row})
+			rows = append(rows, row)
 			continue
 		}
 		sort.Slice(samples, func(i, j int) bool { return samples[i].MeasuredAt.Before(samples[j].MeasuredAt) })
@@ -884,31 +877,8 @@ func buildPosts(ms metricSet, now time.Time, loc *time.Location) []PostRow {
 		row.Likes = formatCount(latest.Likes)
 		row.Replies = formatCount(latest.Replies)
 		row.Reposts = formatCount(latest.Reposts)
-		rate, ok := engagementRate(endCounts(latest))
-		row.Rate = "—"
-		if ok {
-			row.Rate = formatPercent(rate)
-		}
-		row.views, row.rate = latest.Views, rate
-		posts = append(posts, ranked{row: row, rate: rate})
-	}
-	sort.SliceStable(posts, func(i, j int) bool {
-		if posts[i].rate != posts[j].rate {
-			return posts[i].rate > posts[j].rate
-		}
-		return posts[i].row.ID > posts[j].row.ID
-	})
-	rows := make([]PostRow, len(posts))
-	rated := []int{}
-	for i, p := range posts {
-		rows[i] = p.row
-		if p.row.HasSample && p.rate > 0 {
-			rated = append(rated, i)
-		}
-	}
-	if len(rated) >= 2 {
-		rows[rated[0]].Mark = "best"
-		rows[rated[len(rated)-1]].Mark = "worst"
+		row.views, row.replies = latest.Views, latest.Replies
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -941,12 +911,12 @@ type kpiInput struct {
 // buildKPIs lists the figures in reading order: the first three are the hero,
 // then output counts, then today's spend.
 func buildKPIs(in kpiInput) []KPI {
-	views, rate, followers, viewsNote, rateNote := "—", "—", "—", "", ""
+	views, interactions, followers, viewsNote, interactionsNote := "—", "—", "—", "", ""
 	if in.growth.HasViews {
 		views, viewsNote = formatCount(in.growth.Views), in.growth.ViewsDelta
 	}
-	if in.growth.HasMetrics {
-		rate, rateNote = in.growth.Rate, in.growth.RateDelta
+	if in.growth.HasInteractions {
+		interactions, interactionsNote = formatCount(in.growth.Interactions), in.growth.InteractionsDelta
 	}
 	var change string
 	if in.followers.HasData {
@@ -955,7 +925,7 @@ func buildKPIs(in kpiInput) []KPI {
 	kpis := []KPI{
 		{Label: fmt.Sprintf("Views in %d days", in.days), Value: views, Note: viewsNote},
 		{Label: "Followers", Value: followers, Note: change},
-		{Label: "Engagement", Value: rate, Note: rateNote},
+		{Label: fmt.Sprintf("Interactions in %d days", in.days), Value: interactions, Note: interactionsNote},
 		{Label: "Posts", Value: formatInt(in.posts)},
 		{Label: "Replies", Value: formatInt(in.replies)},
 		{Label: "Spend today", Value: formatUSD(in.spentToday) + " / " + formatBudget(in.budget)},

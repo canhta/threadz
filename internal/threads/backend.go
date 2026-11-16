@@ -44,9 +44,12 @@ type Backend interface {
 	ReadReplies(context.Context, string) (Page, error)
 	// ReadOwnMetrics returns the account's follower count.
 	ReadOwnMetrics(context.Context) (OwnFollowers, error)
-	// ReadAccountInsights returns the account's daily views and window totals
+	// ReadAccountInsights returns the account's daily views and link clicks
 	// over since..until.
 	ReadAccountInsights(ctx context.Context, since, until time.Time) (AccountInsights, error)
+	// ReadAccountTotalsDay returns the account's likes, replies, reposts and
+	// quotes of one Pacific day.
+	ReadAccountTotalsDay(context.Context, PacificDay) (DayTotals, error)
 	// ReadActionMetricsBatch returns the insights of the own posts with the given
 	// media ids, one entry per id: a failed id does not fail the others.
 	ReadActionMetricsBatch(context.Context, []string) map[string]ActionMetricsResult

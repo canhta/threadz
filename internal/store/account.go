@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,33 @@ func (s *Store) AccountDailyCount(ctx context.Context, agentID string) (int, err
 		return 0, fmt.Errorf("counting account days: %w", err)
 	}
 	return n, nil
+}
+
+// AccountTotalsDue lists, newest first, the Pacific days among the limit newest
+// that have a views value and either are on or after trailingFrom or lack a
+// value for any of metrics.
+func (s *Store) AccountTotalsDue(ctx context.Context, agentID string, metrics []string, trailingFrom string, limit int) ([]string, error) {
+	args := []any{agentID, limit, trailingFrom, agentID}
+	for _, m := range metrics {
+		args = append(args, m)
+	}
+	args = append(args, len(metrics))
+	rows, err := s.db.QueryContext(ctx, `SELECT v.day FROM (SELECT day FROM account_daily WHERE agent_id=? AND metric='views' AND value IS NOT NULL ORDER BY day DESC LIMIT ?) v
+		WHERE v.day >= ? OR (SELECT COUNT(*) FROM account_daily t WHERE t.agent_id=? AND t.day=v.day AND t.value IS NOT NULL AND t.metric IN (`+strings.TrimSuffix(strings.Repeat("?,", len(metrics)), ",")+`)) < ?
+		ORDER BY v.day DESC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing account days due for totals: %w", err)
+	}
+	defer rows.Close()
+	var days []string
+	for rows.Next() {
+		var day string
+		if err = rows.Scan(&day); err != nil {
+			return nil, fmt.Errorf("reading account day due for totals: %w", err)
+		}
+		days = append(days, day)
+	}
+	return days, rows.Err()
 }
 
 // RecordAccountSample appends one reading of an account total over since..until

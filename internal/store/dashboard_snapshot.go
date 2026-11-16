@@ -118,10 +118,13 @@ type DashboardPhaseSpend struct {
 
 // DashboardAccountDay is one Pacific day of the account's views and the views
 // the agent's own actions gained that day. Views is nil when the day has none.
+// Interactions is the day's likes, replies, reposts and quotes, nil unless the
+// day has a value for each of the four.
 type DashboardAccountDay struct {
-	Day        string
-	Views      *int64
-	Attributed int64
+	Day          string
+	Views        *int64
+	Attributed   int64
+	Interactions *int64
 }
 
 // DashboardMetric is one cumulative measurement of a real post or reply, grouped
@@ -402,10 +405,17 @@ const accountDaysSQL = `WITH gained AS (
 	       MAX(0, m.views - COALESCE(LAG(m.views) OVER (PARTITION BY m.action_id ORDER BY m.measured_at), CASE WHEN a.posted_at < ?1 THEN m.views ELSE 0 END)) AS views
 	FROM metrics m JOIN actions a ON a.id = m.action_id AND a.agent_id = m.agent_id
 	WHERE m.agent_id = ?2 AND a.dry_run = 0 AND m.measured_at >= ?1
+), shown AS (
+	SELECT day, value, starts_at, ends_at FROM account_daily WHERE agent_id = ?2 AND metric = 'views' ORDER BY day DESC LIMIT ?3
+), interactions AS (
+	SELECT day, CASE WHEN COUNT(*) = 4 THEN SUM(value) END AS total FROM account_daily
+	WHERE agent_id = ?2 AND metric IN ('likes', 'replies', 'reposts', 'quotes') AND value IS NOT NULL AND day IN (SELECT day FROM shown)
+	GROUP BY day
 )
-SELECT d.day, d.value, COALESCE(SUM(g.views), 0)
-FROM (SELECT day, value, starts_at, ends_at FROM account_daily WHERE agent_id = ?2 AND metric = 'views' ORDER BY day DESC LIMIT ?3) d
+SELECT d.day, d.value, COALESCE(SUM(g.views), 0), i.total
+FROM shown d
 LEFT JOIN gained g ON g.at >= d.starts_at AND g.at < d.ends_at
+LEFT JOIN interactions i ON i.day = d.day
 GROUP BY d.day
 ORDER BY d.day DESC`
 
@@ -418,7 +428,7 @@ func (r snapshotReader) accountDays(snap *DashboardSnapshot) error {
 	defer rows.Close()
 	for rows.Next() {
 		var d DashboardAccountDay
-		if err = rows.Scan(&d.Day, &d.Views, &d.Attributed); err != nil {
+		if err = rows.Scan(&d.Day, &d.Views, &d.Attributed, &d.Interactions); err != nil {
 			return err
 		}
 		snap.AccountDays = append(snap.AccountDays, d)

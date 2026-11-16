@@ -11,19 +11,23 @@ import (
 )
 
 // accountSeries is the account's daily views by Pacific date and, for each of
-// those days, the views the agent's own actions gained. A day the account has
-// no value for is absent, never 0. A chart day is matched to the Pacific date
+// those days, the views the agent's own actions gained, and the day's
+// interactions (likes, replies, reposts and quotes). A day the account has no
+// value for is absent, never 0. A chart day is matched to the Pacific date
 // with the same calendar date, so a schedule zone far from Pacific time shifts
 // a chart point by up to a day; the headline range is in Pacific days.
 type accountSeries struct {
-	views, attributed map[string]int64
+	views, attributed, interactions map[string]int64
 	// days holds the dates that have a value, newest first.
 	days []string
 }
 
 func accountFrom(days []store.DashboardAccountDay) accountSeries {
-	a := accountSeries{views: map[string]int64{}, attributed: map[string]int64{}}
+	a := accountSeries{views: map[string]int64{}, attributed: map[string]int64{}, interactions: map[string]int64{}}
 	for _, d := range days {
+		if d.Interactions != nil {
+			a.interactions[d.Day] = *d.Interactions
+		}
 		if d.Views != nil {
 			a.views[d.Day], a.attributed[d.Day] = *d.Views, d.Attributed
 			a.days = append(a.days, d.Day)
@@ -60,6 +64,17 @@ func (a accountSeries) total(from, to time.Time) (views, attributed int64, ok bo
 	return views, attributed, ok
 }
 
+// totalInteractions sums the interactions of the days from from up to but
+// excluding to; ok is false when none of them has a value.
+func (a accountSeries) totalInteractions(from, to time.Time) (n int64, ok bool) {
+	for d := from; d.Before(to); d = d.AddDate(0, 0, 1) {
+		if v, has := a.interactions[d.Format("2006-01-02")]; has {
+			n, ok = n+v, true
+		}
+	}
+	return n, ok
+}
+
 // metricSample is one cumulative measurement of an own publication. Views and
 // engagement counters only grow, so a window is the difference between the
 // latest sample at each end. When an action predates the window but has no
@@ -80,8 +95,6 @@ type metricSample struct {
 type counts struct {
 	Views, Likes, Replies, Reposts int64
 }
-
-func (c counts) engagement() int64 { return c.Likes + c.Replies + c.Reposts }
 
 func (c counts) add(o counts) counts {
 	return counts{c.Views + o.Views, c.Likes + o.Likes, c.Replies + o.Replies, c.Reposts + o.Reposts}
@@ -160,13 +173,6 @@ func dayStarts(l config.LimitsConfig, now time.Time, days int) []time.Time {
 	return out
 }
 
-func engagementRate(c counts) (float64, bool) {
-	if c.Views == 0 {
-		return 0, false
-	}
-	return float64(c.engagement()) / float64(c.Views), true
-}
-
 // countDelta describes the change between two period totals in words.
 func countDelta(cur, prior int64, period string) (string, bool) {
 	if prior <= 0 {
@@ -180,22 +186,6 @@ func countDelta(cur, prior int64, period string) (string, bool) {
 		return "up " + formatSignedPercent(change) + " on the previous " + period, true
 	}
 	return "down " + formatSignedPercent(-change) + " on the previous " + period, true
-}
-
-// rateDelta describes the change between two rates in percentage points.
-func rateDelta(cur, prior float64, curOK, priorOK bool, period string) (string, bool) {
-	if !curOK || !priorOK {
-		return "no earlier period to compare", false
-	}
-	points := (cur - prior) * 100
-	switch {
-	case math.Abs(points) < 0.05:
-		return "same as the previous " + period, true
-	case points > 0:
-		return "up " + formatPoints(points) + " points on the previous " + period, true
-	default:
-		return "down " + formatPoints(-points) + " points on the previous " + period, true
-	}
 }
 
 // countDeltaShort is the compact form used in the four secondary stat cells;
@@ -212,13 +202,6 @@ func countDeltaShort(cur, prior int64) string {
 		return "+" + formatSignedPercent(change)
 	}
 	return "-" + formatSignedPercent(-change)
-}
-
-func formatPoints(v float64) string {
-	if v >= 10 || v == math.Trunc(v) {
-		return fmt.Sprintf("%.0f", v)
-	}
-	return fmt.Sprintf("%.1f", v)
 }
 
 func formatSignedPercent(v float64) string {

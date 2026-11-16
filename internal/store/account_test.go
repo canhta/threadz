@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -185,11 +186,25 @@ func TestDashboardSnapshotReadsAccountDaysNewestFirst(t *testing.T) {
 	if err = s.UpsertAccountDays(ctx, "b", "views", []store.AccountDay{{Day: "2026-11-14", StartsAt: ends.Add(-24 * time.Hour), EndsAt: ends, Value: v(9)}}, ends); err != nil {
 		t.Fatal(err)
 	}
+	for i, metric := range []string{"likes", "replies", "reposts", "quotes"} {
+		d13 := store.AccountDay{Day: "2026-11-13", StartsAt: ends.Add(-48 * time.Hour), EndsAt: ends.Add(-24 * time.Hour), Value: v(int64(i + 1))}
+		d14 := store.AccountDay{Day: "2026-11-14", StartsAt: ends.Add(-24 * time.Hour), EndsAt: ends, Value: v(int64(i + 1))}
+		days := []store.AccountDay{d13}
+		if metric != "quotes" {
+			days = append(days, d14)
+		}
+		if err = s.UpsertAccountDays(ctx, "a", metric, days, ends); err != nil {
+			t.Fatal(err)
+		}
+	}
 	snap, err := s.DashboardSnapshot(ctx, store.DashboardQuery{AgentID: "a", From: ends.Add(-72 * time.Hour), Now: ends})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := snap.AccountDays
+	if len(got) == 2 && (got[0].Interactions != nil || got[1].Interactions == nil || *got[1].Interactions != 10) {
+		t.Fatalf("interactions = %v and %v, want none for a day missing a metric and 1+2+3+4 for a full one", got[0].Interactions, got[1].Interactions)
+	}
 	if len(got) != 2 || got[0].Day != "2026-11-14" || got[0].Views != nil || got[1].Day != "2026-11-13" || got[1].Views == nil || *got[1].Views != 7 {
 		t.Fatalf("account days = %+v", got)
 	}
@@ -211,5 +226,46 @@ func TestRecordFollowersKeepsSource(t *testing.T) {
 		if err = s.DB().QueryRow(`SELECT source FROM account_followers WHERE agent_id='a'`).Scan(&got); err != nil || got != source {
 			t.Fatalf("source = %q, %v; want %q", got, err, source)
 		}
+	}
+}
+
+func TestAccountTotalsDueListsTrailingDaysAndDaysMissingAValue(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	at := time.Date(2026, 11, 16, 8, 0, 0, 0, time.UTC)
+	totals := []string{"likes", "replies"}
+	put := func(day string, metric string, val *int64) {
+		t.Helper()
+		starts, _ := time.Parse("2006-01-02", day)
+		if err := s.UpsertAccountDays(ctx, "a", metric, []store.AccountDay{{Day: day, StartsAt: starts, EndsAt: starts.Add(24 * time.Hour), Value: val}}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missing := map[string]string{"2026-11-11": "replies", "2026-11-12": "likes", "2026-11-10": "likes"}
+	for _, day := range []string{"2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14"} {
+		put(day, "views", v(1))
+		for _, m := range totals {
+			if missing[day] != m {
+				put(day, m, v(1))
+			}
+		}
+	}
+	put("2026-11-15", "views", nil)
+	put("2026-11-11", "reposts", v(9))
+
+	got, err := s.AccountTotalsDue(ctx, "a", totals, "2026-11-13", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Newest 4 days with views are 14, 13, 12, 11: 14 and 13 are trailing, 12 and 11 miss a value; 10 is beyond the limit.
+	if want := []string{"2026-11-14", "2026-11-13", "2026-11-12", "2026-11-11"}; !slices.Equal(got, want) {
+		t.Fatalf("due = %v, want %v", got, want)
+	}
+	if got, _ = s.AccountTotalsDue(ctx, "other", totals, "2026-11-13", 4); len(got) != 0 {
+		t.Fatalf("another agent's days = %v", got)
 	}
 }

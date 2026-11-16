@@ -713,11 +713,6 @@ rect.dream {
   line-height: 20px;
 }
 
-.tag.best {
-  box-shadow: inset 0 0 0 1px var(--lime);
-  color: var(--lime);
-}
-
 .tag.band-top {
   box-shadow: inset 0 0 0 1px var(--lime);
   color: var(--lime);
@@ -766,12 +761,7 @@ rect.dream {
   color: var(--dim);
 }
 
-.pstats .rate .i {
-  color: var(--lime);
-}
-
-/* Top performers lead with the rate, so it carries the accent. Tighter than
-   the main list: the column is narrow and the rows are short. */
+/* Tighter than the main list: the column is narrow and the rows are short. */
 .pstats.compact {
   margin-top: var(--s1);
   gap: var(--s1) var(--s3);
@@ -790,11 +780,6 @@ rect.dream {
 
 .pstats b {
   color: var(--tint);
-}
-
-.pstats .rate,
-.pstats .rate b {
-  color: var(--lime);
 }
 
 .toplist > li {

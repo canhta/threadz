@@ -64,9 +64,6 @@ func TestPageProjectsOnlySelectedSafeMetadata(t *testing.T) {
 	if page.Growth.HasViews || page.KPIs[0].Value != "—" || page.Growth.Likes != 30 || page.Growth.Replies != 6 || page.Growth.Reposts != 2 {
 		t.Fatalf("growth totals: %+v", page.Growth)
 	}
-	if page.Growth.Rate != "12.7%" {
-		t.Fatalf("engagement rate: %q", page.Growth.Rate)
-	}
 	if page.Return.CostPer1000 == "" {
 		t.Fatalf("return panel missing: %+v", page.Return)
 	}
@@ -273,32 +270,43 @@ func TestEmptyDryRunAndPopulatedStates(t *testing.T) {
 	full.Phases = []store.DashboardPhaseSpend{{Day: today, Phase: "agent", CostUSD: 0.20}}
 	full.Trends = []store.DashboardTrend{{Title: "Synthetic topic A", Source: "hacker_news", Rank: 1, ObservedAt: fixedNow()}}
 	body = get(newHandler(newSource(full)), "/").Body.String()
-	for _, want := range []string{"1,200", "best", "worst", "Synthetic topic A", "12.5%", "$0.20", "Per 1,000 views"} {
+	for _, want := range []string{"1,200", "Synthetic topic A", "$0.20", "Per 1,000 views"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("populated page missing %q", want)
 		}
 	}
 }
 
-func TestTopPostsRankByUnroundedRateAndMarkBestAndWorst(t *testing.T) {
+func TestTopPostsRankByViewsWithoutAMark(t *testing.T) {
 	snap := started()
-	// 1.04% and 1.00% both print as "1.0%"; only the number tells them apart.
-	snap.Publications = []store.DashboardPublication{pub(3, "post", ago(3*day), ownLink("C")), pub(2, "post", ago(3*day), ownLink("B")), pub(1, "post", ago(3*day), ownLink("A"))}
-	for i, text := range []string{"C", "B", "A"} {
+	snap.Publications = []store.DashboardPublication{pub(3, "post", ago(3*day), ownLink("C")), pub(2, "post", ago(3*day), ownLink("B")), pub(1, "post", ago(3*day), ownLink("A")), pub(4, "post", ago(3*day), ownLink("D"))}
+	for i, text := range []string{"C", "B", "A", "D"} {
 		snap.Publications[i].Text = text
 	}
 	snap.Metrics = []store.DashboardMetric{
-		sample(3, ago(day), 10000, 100, 0, 0),
-		sample(2, ago(day), 10000, 104, 0, 0),
-		sample(1, ago(day), 10000, 50, 0, 0),
+		sample(3, ago(day), 100, 100, 9, 0),
+		sample(2, ago(day), 500, 4, 1, 0),
+		sample(1, ago(day), 300, 50, 5, 0),
+		sample(4, ago(day), 0, 0, 0, 0),
 	}
 	page := mustPage(t, newHandler(newSource(snap)))
 	var got []string
 	for _, p := range page.Growth.Top {
-		got = append(got, p.Link+":"+p.Rate+":"+p.Mark)
+		got = append(got, p.Link+":"+p.Views)
 	}
-	if want := "B:1.0%:best C:1.0%: A:0.5%:worst"; strings.Join(got, " ") != want {
-		t.Fatalf("ranking %q want %q", strings.Join(got, " "), want)
+	if want := "B:500 A:300 C:100"; strings.Join(got, " ") != want {
+		t.Fatalf("top performers %q want %q", strings.Join(got, " "), want)
+	}
+	var orders []string
+	for _, o := range page.Orders {
+		orders = append(orders, o.Label)
+	}
+	if want := "Latest Most views Most replies"; strings.Join(orders, " ") != want {
+		t.Fatalf("orders %q want %q", strings.Join(orders, " "), want)
+	}
+	body := get(newHandler(newSource(snap)), "/").Body.String()
+	if strings.Contains(body, "Engagement rate") || strings.Contains(body, `class="tag best"`) || strings.Contains(body, `class="tag worst"`) {
+		t.Fatal("the page still shows a rate or a best/worst mark")
 	}
 }
 

@@ -38,21 +38,6 @@ func TestEarnedBetweenUsesTheLatestSampleAtEachEnd(t *testing.T) {
 	}
 }
 
-func TestEngagementRateNeedsViews(t *testing.T) {
-	if _, ok := engagementRate(counts{Likes: 5, Replies: 1}); ok {
-		t.Fatal("rate with zero views should be unavailable")
-	}
-	if rate, ok := engagementRate(counts{Views: 200, Likes: 10, Replies: 2, Reposts: 1}); !ok || rate != 0.065 {
-		t.Fatalf("rate = %v %v", rate, ok)
-	}
-	if text, ok := rateDelta(0.065, 0.05, true, true, "7 days"); !ok || text != "up 1.5 points on the previous 7 days" {
-		t.Fatalf("rate delta = %q %v", text, ok)
-	}
-	if text, ok := rateDelta(0.065, 0, false, false, "7 days"); ok || text != "no earlier period to compare" {
-		t.Fatalf("no-baseline rate delta = %q %v", text, ok)
-	}
-}
-
 func TestDailySeriesIsBoundedAndBreaksOnMissingDenominator(t *testing.T) {
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 	for _, days := range []int{7, 14, 30} {

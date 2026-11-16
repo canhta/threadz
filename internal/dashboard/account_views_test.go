@@ -113,3 +113,46 @@ func TestAccountViewsRangeIsTheLastCompletedPacificDays(t *testing.T) {
 		t.Fatalf("today's bucket counted: views %d", g.Views)
 	}
 }
+
+func withInteractions(days []store.DashboardAccountDay, by map[string]int64) []store.DashboardAccountDay {
+	for i := range days {
+		if n, ok := by[days[i].Day]; ok {
+			days[i].Interactions = n64(n)
+		}
+	}
+	return days
+}
+
+func TestInteractionsKPIChangeChartAndGapDay(t *testing.T) {
+	s := accountSnapshot()
+	// 2026-11-09 has views but no interactions: a gap, never a zero. 2026-11-08
+	// has neither. The prior 7 days hold 3 interactions.
+	s.AccountDays = withInteractions(s.AccountDays, map[string]int64{
+		"2026-11-11": 6, "2026-11-10": 5, "2026-11-07": 2, "2026-11-06": 1,
+		"2026-11-04": 1, "2026-11-03": 1, "2026-11-02": 1,
+	})
+	g := mustPage(t, newHandler(newSource(s))).Growth
+	if !g.HasInteractions || g.Interactions != 14 || g.InteractionsDelta != "up 367% on the previous 7 days" {
+		t.Fatalf("interactions = %d (has %v) delta %q, want 6+5+2+1 against 3", g.Interactions, g.HasInteractions, g.InteractionsDelta)
+	}
+	kpis := mustPage(t, newHandler(newSource(s))).KPIs
+	if kpis[2].Label != "Interactions in 7 days" || kpis[2].Value != "14" || kpis[2].Note != g.InteractionsDelta || kpis[2].Tone != "up" {
+		t.Fatalf("KPI = %+v", kpis[2])
+	}
+	if g.InteractionsChart.Title != "Interactions per day" {
+		t.Fatalf("chart title = %q", g.InteractionsChart.Title)
+	}
+	var cells []string
+	for _, row := range g.InteractionsChart.Rows {
+		cells = append(cells, row[1])
+	}
+	if got := strings.Join(cells, ","); got != "1,2,—,—,5,6,—" {
+		t.Fatalf("chart cells = %s", got)
+	}
+
+	s.AccountDays = accountSnapshot().AccountDays
+	page := mustPage(t, newHandler(newSource(s)))
+	if page.Growth.HasInteractions || page.KPIs[2].Value != "—" || page.KPIs[2].Note != "" {
+		t.Fatalf("without any interactions: %+v", page.KPIs[2])
+	}
+}

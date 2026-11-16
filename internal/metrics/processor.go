@@ -45,6 +45,9 @@ const (
 	accountCloseDelay = 5 * time.Minute
 	// accountBackoffSteps caps the doubling of RetryDelay after failed account reads.
 	accountBackoffSteps = 4
+	// accountTotalsDays is how many of the newest days with views get their
+	// likes, replies, reposts and quotes.
+	accountTotalsDays = 60
 
 	accountSource     = "api"
 	reasonAccountRead = "account_insights_stored"

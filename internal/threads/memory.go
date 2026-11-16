@@ -23,6 +23,7 @@ const (
 	OpReadOwnMetrics      = "read_own_metrics"
 	OpReadActionMetrics   = "read_action_metrics"
 	OpReadAccountInsights = "read_account_insights"
+	OpReadAccountTotals   = "read_account_totals_day"
 	OpPost                = "post"
 	OpReply               = "reply"
 	OpClose               = "close"
@@ -46,6 +47,10 @@ type Memory struct {
 	Own OwnFollowers
 	// Account answers read_account_insights; its window is the one asked for.
 	Account AccountInsights
+	// AccountTotals answers read_account_totals_day by Pacific date; a day it
+	// does not hold reports ErrMetricsUnavailable. Account.RegainAfter is the
+	// usage wait of both reads.
+	AccountTotals map[string]map[string]int64
 	// Quota answers publishing_limit.
 	Quota   Quota
 	Actions map[string]Metrics
@@ -196,6 +201,16 @@ func (m *Memory) ReadAccountInsights(ctx context.Context, since, until time.Time
 	out := m.Account
 	out.Since, out.Until = since, until
 	return out, nil
+}
+func (m *Memory) ReadAccountTotalsDay(ctx context.Context, day PacificDay) (DayTotals, error) {
+	if err := m.serve(ctx, Call{Op: OpReadAccountTotals, Arg: day.Day}); err != nil {
+		return DayTotals{}, err
+	}
+	totals, ok := m.AccountTotals[day.Day]
+	if !ok {
+		return DayTotals{}, ErrMetricsUnavailable
+	}
+	return DayTotals{PacificDay: day, Totals: totals, RegainAfter: m.Account.RegainAfter}, nil
 }
 func (m *Memory) ReadActionMetricsBatch(ctx context.Context, ids []string) map[string]ActionMetricsResult {
 	out := make(map[string]ActionMetricsResult, len(ids))

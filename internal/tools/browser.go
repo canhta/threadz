@@ -67,6 +67,9 @@ func (d *Dispatcher) browserRead(ctx context.Context, tool, operation string, a 
 	case threads.OpReadAccountInsights:
 		since, until := threads.AccountWindow(started, int(a.Int("days")))
 		return d.opts.Threads.ReadAccountInsights(ctx, since, until)
+	case threads.OpReadAccountTotals:
+		since, until := threads.AccountWindow(started, int(a.Int("days_ago")))
+		return d.opts.Threads.ReadAccountTotalsDay(ctx, threads.PacificDays(since, until)[0])
 	case threads.OpReadOwnMetrics:
 		if ids := a.IDList("action_ids"); len(ids) > 0 {
 			return d.actionMetrics(ctx, ids)

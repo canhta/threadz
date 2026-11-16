@@ -110,7 +110,7 @@ func TestReadAccountInsightsIsAHarnessReadOfTheClosedPacificDays(t *testing.T) {
 		t.Fatal("a read without days was served")
 	}
 
-	h.backend.Account = threads.AccountInsights{Totals: map[string]int64{"likes": 5}}
+	h.backend.Account = threads.AccountInsights{Clicks: []threads.LinkClicks{{URL: "u", Value: 5}}}
 	h.next()
 	out, err := h.call("read_account_insights", `{"days":3}`)
 	if err != nil {
@@ -121,11 +121,42 @@ func TestReadAccountInsightsIsAHarnessReadOfTheClosedPacificDays(t *testing.T) {
 		t.Fatal(err)
 	}
 	since, until := threads.AccountWindow(h.now, 3)
-	if !got.Since.Equal(since) || !got.Until.Equal(until) || got.Totals["likes"] != 5 {
+	if !got.Since.Equal(since) || !got.Until.Equal(until) || len(got.Clicks) != 1 {
 		t.Fatalf("account insights = %+v, want window %s..%s", got, since, until)
 	}
 	if n := h.backend.Count(threads.OpReadAccountInsights); n != 1 {
 		t.Fatalf("backend reads = %d", n)
+	}
+}
+
+func TestReadAccountTotalsDayIsAHarnessReadOfOneClosedPacificDay(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	for _, tool := range h.dispatch.Definitions() {
+		if tool.Function.Name == "read_account_totals_day" {
+			t.Fatal("read_account_totals_day is offered to the model")
+		}
+	}
+	if _, err := h.dispatch.Dispatch(context.Background(), llm.ToolCall{ID: "model-call", Type: "function", Function: llm.CallFunction{Name: "read_account_totals_day", Arguments: `{"days_ago":1}`}}); !errors.Is(err, guard.ErrBlocked) {
+		t.Fatalf("a model call to a harness read: %v", err)
+	}
+	if _, err := h.call("read_account_totals_day", `{}`); err == nil {
+		t.Fatal("a read without days_ago was served")
+	}
+
+	since, _ := threads.AccountWindow(h.now, 2)
+	want := threads.PacificDays(since, since.AddDate(0, 0, 1))[0]
+	h.backend.AccountTotals = map[string]map[string]int64{want.Day: {"likes": 5, "replies": 1, "reposts": 0, "quotes": 0}}
+	h.next()
+	out, err := h.call("read_account_totals_day", `{"days_ago":2}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got threads.DayTotals
+	if err := json.Unmarshal(decodeBrowserEnvelope(t, out).Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Day != want.Day || !got.StartsAt.Equal(want.StartsAt) || !got.EndsAt.Equal(want.EndsAt) || got.Totals["likes"] != 5 {
+		t.Fatalf("day totals = %+v, want the Pacific day %+v", got, want)
 	}
 }
 

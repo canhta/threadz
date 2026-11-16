@@ -26,20 +26,19 @@ func TestAccountInsightsParsesSavedReads(t *testing.T) {
 			{EndsAt: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), Value: 35285},
 			{EndsAt: time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC), Value: 36925},
 		},
-		Totals: map[string]int64{"likes": 133, "replies": 27, "reposts": 0, "quotes": 0},
 		Clicks: []LinkClicks{{URL: "https://threadz.canhta.com/", Value: 4}, {URL: "https://example.com/", Value: 0}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("account insights = %+v\nwant %+v", got, want)
 	}
 	q := f.queries["GET "+accountPath]
-	if q["metric"] != "views,likes,replies,reposts,quotes,clicks" || q["since"] != "1794556800" || q["until"] != "1794729600" {
+	if q["metric"] != "views,clicks" || q["since"] != "1794556800" || q["until"] != "1794729600" {
 		t.Fatalf("query = %v", q)
 	}
 
 	f.route("GET", accountPath, "account_views_7d.json")
 	got, err = api.ReadAccountInsights(ctx, since, until)
-	if err != nil || len(got.Views) != 8 || got.Views[4].Value != 1374 || len(got.Totals) != 0 || got.Clicks != nil {
+	if err != nil || len(got.Views) != 8 || got.Views[4].Value != 1374 || got.Clicks != nil {
 		t.Fatalf("views-only read = %+v, %v", got, err)
 	}
 	var sum int64
@@ -51,18 +50,57 @@ func TestAccountInsightsParsesSavedReads(t *testing.T) {
 	}
 }
 
+func TestAccountTotalsDayParsesSavedRead(t *testing.T) {
+	f, api, _ := newFake(t)
+	day := PacificDays(time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC))[0]
+	f.route("GET", accountPath, "account_totals_day.json")
+	f.headers = map[string]string{"GET " + accountPath: `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":7}]}`}
+	got, err := api.ReadAccountTotalsDay(context.Background(), day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DayTotals{PacificDay: day, Totals: map[string]int64{"likes": 293, "replies": 66, "reposts": 0, "quotes": 0}, RegainAfter: 7 * time.Minute}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("day totals = %+v\nwant %+v", got, want)
+	}
+	q := f.queries["GET "+accountPath]
+	if q["metric"] != "likes,replies,reposts,quotes" || q["since"] != "1794643200" || q["until"] != "1794729600" {
+		t.Fatalf("query = %v", q)
+	}
+}
+
+func TestAccountTotalsDayRefusals(t *testing.T) {
+	day := PacificDays(time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC))[0]
+	for name, body := range map[string]string{
+		"no metrics":      `{"data":[]}`,
+		"a metric absent": `{"data":[{"name":"likes","total_value":{"value":5}},{"name":"replies","total_value":{"value":1}},{"name":"reposts","total_value":{"value":0}}]}`,
+		"no total":        `{"data":[{"name":"likes"},{"name":"replies","total_value":{"value":1}},{"name":"reposts","total_value":{"value":0}},{"name":"quotes","total_value":{"value":0}}]}`,
+		"negative total":  `{"data":[{"name":"likes","total_value":{"value":-2}},{"name":"replies","total_value":{"value":1}},{"name":"reposts","total_value":{"value":0}},{"name":"quotes","total_value":{"value":0}}]}`,
+	} {
+		f, api, _ := newFake(t)
+		f.route("GET", accountPath, body)
+		if _, err := api.ReadAccountTotalsDay(context.Background(), day); !errors.Is(err, ErrMetricsUnavailable) {
+			t.Errorf("%s: err = %v, want ErrMetricsUnavailable", name, err)
+		}
+	}
+	f, api, _ := newFake(t)
+	f.route("GET", accountPath, "error.json")
+	f.headers = map[string]string{"GET " + accountPath: `{"1000000000000001":[{"type":"threads","estimated_time_to_regain_access":12}]}`}
+	var limited *RateLimitedError
+	if _, err := api.ReadAccountTotalsDay(context.Background(), day); !errors.As(err, &limited) || limited.Wait != 12*time.Minute {
+		t.Errorf("failed read under a wait: %v", err)
+	}
+}
+
 func TestAccountInsightsRefusals(t *testing.T) {
 	ctx := context.Background()
 	since, until := time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC)
 	for name, body := range map[string]string{
 		"no metrics":     `{"data":[]}`,
-		"totals only":    `{"data":[{"name":"likes","total_value":{"value":5}}]}`,
 		"clicks only":    `{"data":[{"name":"clicks","link_total_values":[{"value":1,"link_url":"u"}]}]}`,
-		"no view days":   `{"data":[{"name":"views","values":[]},{"name":"likes","total_value":{"value":5}}]}`,
+		"no view days":   `{"data":[{"name":"views","values":[]}]}`,
 		"bad end_time":   `{"data":[{"name":"views","values":[{"value":1,"end_time":"yesterday"}]}]}`,
 		"negative views": `{"data":[{"name":"views","values":[{"value":-1,"end_time":"2026-11-14T08:00:00+0000"}]}]}`,
-		"total missing":  `{"data":[{"name":"likes"}]}`,
-		"negative total": `{"data":[{"name":"likes","total_value":{"value":-2}}]}`,
 		"negative click": `{"data":[{"name":"clicks","link_total_values":[{"value":-1,"link_url":"u"}]}]}`,
 	} {
 		f, api, _ := newFake(t)

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 	// The account series is cut at midnight America/Los_Angeles; the zone must
 	// load on a host without zoneinfo.
@@ -20,8 +22,12 @@ const (
 	// 2 years and one call returned 700 daily buckets.
 	AccountBackfillDays = 700
 
-	accountInsightMetrics = "views,likes,replies,reposts,quotes,clicks"
+	accountInsightMetrics = "views,clicks"
 )
+
+// AccountTotalMetrics are the metrics a one-day read returns as `total_value`.
+// `views` is not among them: the same one-day window returns two buckets.
+var AccountTotalMetrics = []string{"likes", "replies", "reposts", "quotes"}
 
 // pacific cannot fail to load: time/tzdata embeds the zone.
 var pacific, _ = time.LoadLocation("America/Los_Angeles")
@@ -74,16 +80,22 @@ type LinkClicks struct {
 }
 
 // AccountInsights is one read of the account's `threads_insights` over
-// Since..Until. Views is a daily series; Totals holds likes, replies, reposts
-// and quotes summed over the whole window (a metric the API did not return is
-// absent, never 0); Clicks are per-link totals. RegainAfter is the wait the
-// API's usage header asks for; zero when it asks for none.
+// Since..Until. Views is a daily series; Clicks are per-link totals.
+// RegainAfter is the wait the API's usage header asks for; zero when it asks
+// for none.
 type AccountInsights struct {
 	Since, Until time.Time
 	Views        []DayViews
-	Totals       map[string]int64
 	Clicks       []LinkClicks
 	RegainAfter  time.Duration
+}
+
+// DayTotals is the likes, replies, reposts and quotes of one Pacific day, read
+// with a window of exactly that day. RegainAfter is as in AccountInsights.
+type DayTotals struct {
+	PacificDay
+	Totals      map[string]int64
+	RegainAfter time.Duration
 }
 
 // RateLimitedError is a failed read made while the usage header asked for a
@@ -96,8 +108,8 @@ type RateLimitedError struct {
 func (e *RateLimitedError) Error() string { return "threads rate limited: " + e.Err.Error() }
 func (e *RateLimitedError) Unwrap() error { return e.Err }
 
-// ReadAccountInsights reads the account's views, likes, replies, reposts,
-// quotes and clicks over since..until in one request.
+// ReadAccountInsights reads the account's views and clicks over since..until in
+// one request.
 func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (AccountInsights, error) {
 	var in insights
 	q := url.Values{"metric": {accountInsightMetrics}, "since": {strconv.FormatInt(since.Unix(), 10)}, "until": {strconv.FormatInt(until.Unix(), 10)}}
@@ -105,7 +117,7 @@ func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (
 	if err != nil {
 		return AccountInsights{}, err
 	}
-	out := AccountInsights{Since: since, Until: until, Totals: map[string]int64{}, RegainAfter: usageWait(header)}
+	out := AccountInsights{Since: since, Until: until, RegainAfter: usageWait(header)}
 	for _, d := range in.Data {
 		switch d.Name {
 		case "views":
@@ -116,11 +128,6 @@ func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (
 				}
 				out.Views = append(out.Views, DayViews{EndsAt: end, Value: p.Value})
 			}
-		case "likes", "replies", "reposts", "quotes":
-			if d.TotalValue == nil || d.TotalValue.Value < 0 || d.TotalValue.Value > snapshotMaxMetric {
-				return AccountInsights{}, ErrMetricsUnavailable
-			}
-			out.Totals[d.Name] = d.TotalValue.Value
 		case "clicks":
 			for _, l := range d.LinkTotals {
 				if l.Value < 0 || l.Value > snapshotMaxMetric {
@@ -132,6 +139,31 @@ func (a *API) ReadAccountInsights(ctx context.Context, since, until time.Time) (
 	}
 	if len(out.Views) == 0 {
 		return AccountInsights{}, ErrMetricsUnavailable
+	}
+	return out, nil
+}
+
+// ReadAccountTotalsDay reads the account's likes, replies, reposts and quotes
+// over the one Pacific day. A response without all four is refused.
+func (a *API) ReadAccountTotalsDay(ctx context.Context, day PacificDay) (DayTotals, error) {
+	var in insights
+	q := url.Values{"metric": {strings.Join(AccountTotalMetrics, ",")}, "since": {strconv.FormatInt(day.StartsAt.Unix(), 10)}, "until": {strconv.FormatInt(day.EndsAt.Unix(), 10)}}
+	header, err := a.doHeader(ctx, http.MethodGet, "/"+a.o.UserID+"/threads_insights", q, &in)
+	if err != nil {
+		return DayTotals{}, err
+	}
+	out := DayTotals{PacificDay: day, Totals: map[string]int64{}, RegainAfter: usageWait(header)}
+	for _, d := range in.Data {
+		if !slices.Contains(AccountTotalMetrics, d.Name) {
+			continue
+		}
+		if d.TotalValue == nil || d.TotalValue.Value < 0 || d.TotalValue.Value > snapshotMaxMetric {
+			return DayTotals{}, ErrMetricsUnavailable
+		}
+		out.Totals[d.Name] = d.TotalValue.Value
+	}
+	if len(out.Totals) != len(AccountTotalMetrics) {
+		return DayTotals{}, ErrMetricsUnavailable
 	}
 	return out, nil
 }

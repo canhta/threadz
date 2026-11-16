@@ -141,22 +141,25 @@ type GrowthPanel struct {
 	Likes          int64
 	Replies        int64
 	Reposts        int64
-	Rate           string
 	ViewsDelta     string
 	LikesDelta     string
 	RepliesDelta   string
 	RepostsDelta   string
-	RateDelta      string
 	ViewsChart     *Chart
-	RateChart      *Chart
-	Posts          []PostRow
-	Shown          int
-	Total          int
-	Top            []PostRow
-	LastMeasured   string
-	MeasuredAt     time.Time
-	Unmeasured     int
-	RangeLabel     string
+	// HasInteractions is set when the account's interactions have a value in
+	// the range; Interactions is their sum.
+	HasInteractions   bool
+	Interactions      int64
+	InteractionsDelta string
+	InteractionsChart *Chart
+	Posts             []PostRow
+	Shown             int
+	Total             int
+	Top               []PostRow
+	LastMeasured      string
+	MeasuredAt        time.Time
+	Unmeasured        int
+	RangeLabel        string
 }
 
 type TrendingPanel struct {
@@ -167,10 +170,9 @@ type TrendingPanel struct {
 }
 
 type PostRow struct {
-	// views and rate are the unformatted sort keys; unexported, so they never
+	// views and replies are the unformatted sort keys; unexported, so they never
 	// reach the JSON projection.
-	views int64
-	rate  float64
+	views, replies int64
 
 	ID        int64
 	Link      string
@@ -183,8 +185,6 @@ type PostRow struct {
 	Likes     string
 	Replies   string
 	Reposts   string
-	Rate      string
-	Mark      string
 	HasSample bool
 	// Label is Deleted for a post gone from Threads; empty otherwise.
 	Label string
