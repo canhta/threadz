@@ -29,7 +29,7 @@ func goneRun(t *testing.T, own []threads.Post) (*store.Store, metrics.Result) {
 		t.Fatal(err)
 	}
 	source := threads.NewMemory()
-	source.Errors[threads.OpReadOwnMetrics] = threads.ErrMediaNotFound
+	source.Errors[threads.OpReadActionMetrics] = threads.ErrMediaNotFound
 	source.Pages[threads.OpReadOwnPosts] = threads.Page{Kind: "own_posts", Posts: own}
 	p, err := metrics.New(metrics.Options{Store: st, Template: tmpl, Now: func() time.Time { return start.Add(time.Hour) }, FetchTrends: metricTrends, ThreadsFactory: func(context.Context, config.Template) (threads.Backend, error) { return source, nil }})
 	if err != nil {
@@ -48,18 +48,18 @@ func TestDeletedPostEndsItsJobsAndShowsAsDeleted(t *testing.T) {
 		t.Fatalf("result=%+v", got)
 	}
 	var ended int
-	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM metric_jobs WHERE completed_at IS NOT NULL AND reason='media_gone'`).Scan(&ended); err != nil || ended != 3 {
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM metric_jobs WHERE completed_at IS NOT NULL AND reason='media_gone'`).Scan(&ended); err != nil || ended != len(store.MetricWindowMinutes) {
 		t.Fatalf("ended jobs=%d err=%v", ended, err)
 	}
 }
 
 func TestListedPostIsNotGoneAndBacksOff(t *testing.T) {
 	st, got := goneRun(t, []threads.Post{{ID: "own"}})
-	if got.DeferredJobs != 1 {
+	if got.DeferredJobs != 2 {
 		t.Fatalf("result=%+v", got)
 	}
 	var attempts int
-	if err := st.DB().QueryRow(`SELECT attempts FROM metric_jobs WHERE window_hours=1`).Scan(&attempts); err != nil || attempts != 1 {
+	if err := st.DB().QueryRow(`SELECT attempts FROM metric_jobs WHERE window_minutes=60`).Scan(&attempts); err != nil || attempts != 1 {
 		t.Fatalf("attempts=%d err=%v", attempts, err)
 	}
 }

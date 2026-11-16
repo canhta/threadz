@@ -44,14 +44,14 @@ func TestMetricCoreSeedConfirmedOnlyAndExactDue(t *testing.T) {
 	metricCoreAction(t, s, "a", at.Format(time.RFC3339Nano), "", false)
 	metricCoreAction(t, s, "a", at.Format(time.RFC3339Nano), "https://example.test/dry", true)
 	metricCoreAction(t, s, "b", at.Format(time.RFC3339Nano), "https://example.test/other", false)
-	if n, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil || n != 3 {
+	if n, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil || n != len(store.MetricWindowMinutes) {
 		t.Fatalf("seed %d %v", n, err)
 	}
 	if n, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil || n != 0 {
 		t.Fatalf("reseed %d %v", n, err)
 	}
 	due, ok, err := s.NextMetricDue(ctx, "a")
-	if err != nil || !ok || !due.Equal(at.Add(time.Hour)) {
+	if err != nil || !ok || !due.Equal(at.Add(15*time.Minute)) {
 		t.Fatalf("due %v %v %v", due, ok, err)
 	}
 	jobs, err := s.ClaimMetricJobs(ctx, "a", due.Add(-time.Nanosecond), time.Minute, 1)
@@ -59,7 +59,7 @@ func TestMetricCoreSeedConfirmedOnlyAndExactDue(t *testing.T) {
 		t.Fatalf("early claim %+v %v", jobs, err)
 	}
 	jobs, err = s.ClaimMetricJobs(ctx, "a", due, time.Minute, 1)
-	if err != nil || len(jobs) != 1 || jobs[0].ActionID != id || jobs[0].WindowHours != 1 || !jobs[0].PostedAt.Equal(at) || jobs[0].ClaimVersion < 1 {
+	if err != nil || len(jobs) != 1 || jobs[0].ActionID != id || jobs[0].WindowMinutes != 15 || !jobs[0].PostedAt.Equal(at) || jobs[0].ClaimVersion < 1 {
 		t.Fatalf("exact claim %+v %v", jobs, err)
 	}
 }
@@ -72,16 +72,16 @@ func TestMetricCoreCatchUpOneActualSampleAndFencedRecovery(t *testing.T) {
 	if _, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	now := at.Add(25 * time.Hour)
+	now := at.Add(8 * 24 * time.Hour)
 	old, err := s.ClaimMetricJobs(ctx, "a", now, time.Minute, 1)
-	if err != nil || len(old) != 3 {
+	if err != nil || len(old) != len(store.MetricWindowMinutes) {
 		t.Fatalf("catch-up %+v %v", old, err)
 	}
 	if jobs, err := s.ClaimMetricJobs(ctx, "a", now.Add(time.Minute-time.Nanosecond), time.Minute, 1); err != nil || len(jobs) != 0 {
 		t.Fatalf("live lease %+v %v", jobs, err)
 	}
 	fresh, err := s.ClaimMetricJobs(ctx, "a", now.Add(time.Minute), time.Minute, 1)
-	if err != nil || len(fresh) != 3 || fresh[0].ClaimVersion <= old[0].ClaimVersion {
+	if err != nil || len(fresh) != len(store.MetricWindowMinutes) || fresh[0].ClaimVersion <= old[0].ClaimVersion {
 		t.Fatalf("recovery %+v %v", fresh, err)
 	}
 	if _, err = s.CompleteMetricJobs(ctx, old, now.Add(time.Minute), store.MetricValues{Views: 999}); !errors.Is(err, store.ErrMetricClaim) {
@@ -97,7 +97,7 @@ func TestMetricCoreCatchUpOneActualSampleAndFencedRecovery(t *testing.T) {
 	if ok, err := s.CompleteMetricJobs(ctx, fresh, measured.Add(time.Hour), store.MetricValues{Views: 999}); err != nil || ok {
 		t.Fatalf("idempotent %v %v", ok, err)
 	}
-	summary, err := s.OwnerSummary(ctx, "a", false, at, at.Add(48*time.Hour), "")
+	summary, err := s.OwnerSummary(ctx, "a", false, at, at.Add(10*24*time.Hour), "")
 	if err != nil || summary.MetricSamples != 1 || summary.Views != 42 {
 		t.Fatalf("sample %+v %v", summary, err)
 	}
@@ -143,9 +143,9 @@ func metricCoreClaimAll(t *testing.T, s *store.Store) ([]store.MetricJob, time.T
 	if _, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	now := at.Add(25 * time.Hour)
+	now := at.Add(8 * 24 * time.Hour)
 	jobs, err := s.ClaimMetricJobs(ctx, "a", now, 5*time.Minute, 1)
-	if err != nil || len(jobs) != 3 {
+	if err != nil || len(jobs) != len(store.MetricWindowMinutes) {
 		t.Fatalf("claims %+v %v", jobs, err)
 	}
 	return jobs, now
@@ -174,7 +174,7 @@ func TestMetricCoreRejectsForgedPartialExpiredAndInvalidSamples(t *testing.T) {
 			}
 			return j
 		}},
-		{name: "invalid window", change: func(j []store.MetricJob) []store.MetricJob { j[0].WindowHours = 2; return j }},
+		{name: "invalid window", change: func(j []store.MetricJob) []store.MetricJob { j[0].WindowMinutes = 2; return j }},
 		{name: "no jobs", change: func(j []store.MetricJob) []store.MetricJob { return nil }},
 		{name: "expired", advance: 5 * time.Minute},
 		{name: "before claim", advance: -time.Nanosecond},
@@ -203,7 +203,7 @@ func TestMetricCorePersistenceFailureRollsBackSampleAndAllCheckpoints(t *testing
 	s := metricCoreStore(t)
 	jobs, now := metricCoreClaimAll(t, s)
 	ctx := context.Background()
-	if _, err := s.DB().Exec(`CREATE TRIGGER reject_metric_checkpoint BEFORE UPDATE ON metric_jobs WHEN NEW.window_hours=6 AND NEW.completed_at IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected_checkpoint_failure'); END`); err != nil {
+	if _, err := s.DB().Exec(`CREATE TRIGGER reject_metric_checkpoint BEFORE UPDATE ON metric_jobs WHEN NEW.window_minutes=360 AND NEW.completed_at IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected_checkpoint_failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := s.CompleteMetricJobs(ctx, jobs, now, store.MetricValues{Views: 42}); err == nil || ok {
@@ -250,7 +250,7 @@ func TestMetricCoreDeferralIsAtomicSafeAndExact(t *testing.T) {
 	if err := s.DeferMetricJobs(ctx, jobs, now, now, "read_failed"); err == nil {
 		t.Fatal("nonfuture retry")
 	}
-	if _, err := s.DB().Exec(`CREATE TRIGGER reject_metric_defer BEFORE UPDATE ON metric_jobs WHEN NEW.window_hours=6 AND NEW.reason<>'' BEGIN SELECT RAISE(ABORT,'injected_defer_failure'); END`); err != nil {
+	if _, err := s.DB().Exec(`CREATE TRIGGER reject_metric_defer BEFORE UPDATE ON metric_jobs WHEN NEW.window_minutes=360 AND NEW.reason<>'' BEGIN SELECT RAISE(ABORT,'injected_defer_failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeferMetricJobs(ctx, jobs, now, retry, "read_failed"); err == nil {
@@ -274,7 +274,7 @@ func TestMetricCoreDeferralIsAtomicSafeAndExact(t *testing.T) {
 		t.Fatalf("early retry %+v %v", early, err)
 	}
 	fresh, err := s.ClaimMetricJobs(ctx, "a", retry, time.Minute, 1)
-	if err != nil || len(fresh) != 3 || fresh[0].ClaimVersion <= jobs[0].ClaimVersion {
+	if err != nil || len(fresh) != len(store.MetricWindowMinutes) || fresh[0].ClaimVersion <= jobs[0].ClaimVersion {
 		t.Fatalf("retry fence %+v %v", fresh, err)
 	}
 	if ok, err := s.CompleteMetricJobs(ctx, fresh, retry, store.MetricValues{}); err != nil || !ok {
@@ -312,15 +312,15 @@ func TestMetricCoreDeterministicActionLimitAndIndependentAgents(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	now := at.Add(48 * time.Hour)
+	now := at.Add(8 * 24 * time.Hour)
 	for _, want := range []int64{earlier, tie, later} {
 		jobs, err := s.ClaimMetricJobs(ctx, "a", now, time.Minute, 1)
-		if err != nil || len(jobs) != 3 || jobs[0].ActionID != want {
+		if err != nil || len(jobs) != len(store.MetricWindowMinutes) || jobs[0].ActionID != want {
 			t.Fatalf("deterministic group want %d got %+v %v", want, jobs, err)
 		}
 	}
 	jobs, err := s.ClaimMetricJobs(ctx, "b", now, time.Minute, 1)
-	if err != nil || len(jobs) != 3 || jobs[0].ActionID != other {
+	if err != nil || len(jobs) != len(store.MetricWindowMinutes) || jobs[0].ActionID != other {
 		t.Fatalf("other agent %+v %v", jobs, err)
 	}
 }
@@ -333,7 +333,7 @@ func TestMetricCoreConcurrentClaimsAndCompletions(t *testing.T) {
 	if _, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	now := at.Add(48 * time.Hour)
+	now := at.Add(8 * 24 * time.Hour)
 	start := make(chan struct{})
 	results := make(chan []store.MetricJob, 8)
 	errs := make(chan error, 8)
@@ -356,7 +356,7 @@ func TestMetricCoreConcurrentClaimsAndCompletions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(claimed) != 3 {
+	if len(claimed) != len(store.MetricWindowMinutes) {
 		t.Fatalf("duplicate claim %+v", claimed)
 	}
 	begin := make(chan struct{})
@@ -382,7 +382,7 @@ func TestMetricCoreConcurrentClaimsAndCompletions(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("committed %d samples", count)
 	}
-	summary, err := s.OwnerSummary(ctx, "a", false, at, at.Add(72*time.Hour), "")
+	summary, err := s.OwnerSummary(ctx, "a", false, at, at.Add(10*24*time.Hour), "")
 	if err != nil || summary.MetricSamples != 1 || summary.Views != 10 {
 		t.Fatalf("samples %+v %v", summary, err)
 	}
@@ -398,11 +398,11 @@ func TestMetricCoreValidTimestampZonesAndDistantNanoseconds(t *testing.T) {
 				t.Fatal(err)
 			}
 			metricCoreAction(t, s, "a", stamp, "https://example.test/own", false)
-			if n, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil || n != 3 {
+			if n, err := s.SeedMetricJobs(ctx, "a", time.Unix(0, 0)); err != nil || n != len(store.MetricWindowMinutes) {
 				t.Fatalf("seed %d %v", n, err)
 			}
 			due, ok, err := s.NextMetricDue(ctx, "a")
-			if err != nil || !ok || !due.Equal(at.Add(time.Hour)) {
+			if err != nil || !ok || !due.Equal(at.Add(15*time.Minute)) {
 				t.Fatalf("due %v %v %v", due, ok, err)
 			}
 			early, err := s.ClaimMetricJobs(ctx, "a", due.Add(-time.Nanosecond), time.Minute, 1)
@@ -448,26 +448,26 @@ func TestMetricCoreNextDueRespectsActionWideLease(t *testing.T) {
 	}
 	// The first window is held while the second becomes due. A second worker
 	// must wait for the whole action lease, then read once for both windows.
-	jobs, err := s.ClaimMetricJobs(ctx, "a", at.Add(time.Hour), 6*time.Hour, 1)
+	jobs, err := s.ClaimMetricJobs(ctx, "a", at.Add(15*time.Minute), 6*time.Hour, 1)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claim %+v %v", jobs, err)
 	}
 	due, ok, err := s.NextMetricDue(ctx, "a")
-	if err != nil || !ok || !due.Equal(at.Add(7*time.Hour)) {
+	if err != nil || !ok || !due.Equal(at.Add(6*time.Hour+15*time.Minute)) {
 		t.Fatalf("lease due %v %v %v", due, ok, err)
 	}
 	if claimed, err := s.ClaimMetricJobs(ctx, "a", at.Add(6*time.Hour), time.Minute, 1); err != nil || len(claimed) != 0 {
 		t.Fatalf("overlap %+v %v", claimed, err)
 	}
 	recovered, err := s.ClaimMetricJobs(ctx, "a", due, time.Minute, 1)
-	if err != nil || len(recovered) != 2 {
+	if err != nil || len(recovered) != 4 {
 		t.Fatalf("recovered %+v %v", recovered, err)
 	}
 	if ok, err := s.CompleteMetricJobs(ctx, recovered, due, store.MetricValues{Views: 20}); err != nil || !ok {
 		t.Fatalf("complete %v %v", ok, err)
 	}
 	due, ok, err = s.NextMetricDue(ctx, "a")
-	if err != nil || !ok || !due.Equal(at.Add(24*time.Hour)) {
+	if err != nil || !ok || !due.Equal(at.Add(12*time.Hour)) {
 		t.Fatalf("remaining due %v %v %v", due, ok, err)
 	}
 }

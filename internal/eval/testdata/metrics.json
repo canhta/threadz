@@ -2,12 +2,18 @@
   "description": "Actual metric jobs, guarded action reads, restart recovery and SQLite at injected logical time; no model, network or live qualification.",
   "cases": [
     {
-      "id": "metrics_three_windows",
+      "id": "metrics_every_window",
       "kind": "metrics",
       "scenario": "windows",
       "expect": {
         "end_reason": "completed",
         "tools": [
+          "read_own_metrics",
+          "read_own_metrics",
+          "read_own_metrics",
+          "read_own_metrics",
+          "read_own_metrics",
+          "read_own_metrics",
           "read_own_metrics",
           "read_own_metrics",
           "read_own_metrics"
@@ -32,7 +38,6 @@
       "expect": {
         "end_reason": "completed",
         "tools": [
-          "read_own_metrics",
           "read_own_metrics"
         ]
       }

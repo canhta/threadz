@@ -99,7 +99,7 @@ type Record struct {
 	TokensIn, TokensOut                                           int64
 	CostUSD                                                       float64
 	ActionID                                                      int64
-	WindowHours, Jobs, Samples                                    int
+	WindowMinutes, Jobs, Samples                                  int
 	TargetAt, MeasuredAt                                          time.Time
 	LatenessMS                                                    int64
 	N                                                             int64
@@ -125,7 +125,7 @@ func Emit(ctx context.Context, logger *slog.Logger, level slog.Level, r Record) 
 		attrs = append(attrs, slog.Int("count", r.Count))
 	}
 	if r.ActionID > 0 || r.Event == MetricsScheduled || r.Event == MetricsFinished {
-		attrs = append(attrs, slog.Int64("action_id", r.ActionID), slog.Int("window_hours", r.WindowHours), slog.Int("jobs", r.Jobs), slog.Int("samples", r.Samples), slog.Int64("lateness_ms", r.LatenessMS))
+		attrs = append(attrs, slog.Int64("action_id", r.ActionID), slog.Int("window_minutes", r.WindowMinutes), slog.Int("jobs", r.Jobs), slog.Int("samples", r.Samples), slog.Int64("lateness_ms", r.LatenessMS))
 	}
 	if r.N > 0 {
 		attrs = append(attrs, slog.Int64("n", r.N))

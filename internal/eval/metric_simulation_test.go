@@ -18,13 +18,13 @@ func TestMultiDaySimulationUsesActualCodeAndDatabaseRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Synthetic || got.TimingKind != "logical_time" || got.Restarts != 1 || got.ConfirmedActions != 7 || got.Samples != 19 || got.CompletedTargets != 21 || got.SourceReads != 20 || got.ExpectedSamples != 19 {
+	if !got.Synthetic || got.TimingKind != "logical_time" || got.Restarts != 1 || got.ConfirmedActions != 7 || got.Samples != 32 || got.CompletedTargets != 63 || got.SourceReads != 31 || got.ExpectedSamples != 32 {
 		t.Fatalf("%+v", got)
 	}
-	if measured, targets := strings.Count(logs.String(), `"event":"metrics.measured"`), strings.Count(logs.String(), `"event":"metrics.target.completed"`); measured != 19 || targets != 21 {
+	if measured, targets := strings.Count(logs.String(), `"event":"metrics.measured"`), strings.Count(logs.String(), `"event":"metrics.target.completed"`); measured != 32 || targets != 43 {
 		t.Fatalf("measurement events=%d target events=%d", measured, targets)
 	}
-	for _, s := range []string{`"event":"metrics.measured"`, `"reason":"sample_committed"`, `"lateness_ms":90000000`, `"event":"guard.checked"`} {
+	for _, s := range []string{`"event":"metrics.measured"`, `"reason":"sample_committed"`, `"lateness_ms":92700000`, `"event":"guard.checked"`} {
 		if !strings.Contains(logs.String(), s) {
 			t.Errorf("missing evidence %s", s)
 		}

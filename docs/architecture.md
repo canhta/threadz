@@ -55,7 +55,7 @@ Each fact about an agent lives in exactly one owner. The agent changes only the 
 | Draft | Brief (`angle`, `fact`, rough `text`) | Writer, then critic | Tool-free LLM calls ([content.md](content.md)) |
 | Gate | Tool call | Guard | Audit row, rules, atomic intent ([guards.md](guards.md)) |
 | Publish | Reserved intent | Backend | API container flow, or browser reply |
-| Measure | Published action | Metric jobs at +1h, +6h, +24h | Samples |
+| Measure | Published action | Metric jobs at +15 min to +168 h, batched | Samples |
 
 ## LLM layer
 

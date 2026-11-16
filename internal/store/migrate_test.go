@@ -88,9 +88,9 @@ func buildSchema(t *testing.T, file string, version int) *sql.DB {
 	return db
 }
 
-func TestMigrate14MatchesFreshSchema(t *testing.T) {
+func TestMigrate15MatchesFreshSchema(t *testing.T) {
 	ctx := context.Background()
-	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-14.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-15.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +102,15 @@ func TestMigrate14MatchesFreshSchema(t *testing.T) {
 		t.Fatalf("seeding v13: %v", err)
 	}
 	if _, err = old.ExecContext(ctx, string(migration)); err != nil {
-		t.Fatalf("applying migrate-14.sql: %v", err)
+		t.Fatalf("applying migrate-15.sql: %v", err)
 	}
-	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "v14.db"))
+	fresh, err := Open(ctx, filepath.Join(t.TempDir(), "v15.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fresh.Close()
 	if want, got := readShape(t, fresh.db), readShape(t, old); !reflect.DeepEqual(want, got) {
-		t.Fatalf("migrated schema differs from a fresh v14 schema\nfresh:    %+v\nmigrated: %+v", want, got)
+		t.Fatalf("migrated schema differs from a fresh v15 schema\nfresh:    %+v\nmigrated: %+v", want, got)
 	}
 	var version int
 	if err = old.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
@@ -126,21 +126,23 @@ func TestMigrate14MatchesFreshSchema(t *testing.T) {
 	}
 }
 
-func TestMigrate14RefusesOtherVersions(t *testing.T) {
-	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-14.sql"))
+func TestMigrate15RefusesOtherVersions(t *testing.T) {
+	migration, err := os.ReadFile(filepath.Join("..", "..", "deploy", "migrate-15.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "x.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA user_version=14`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(string(migration)); err == nil {
-		t.Fatal("migration ran on a v14 database")
+	for _, version := range []int{14, 15} {
+		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "x.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1)
+		if _, err = db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, version)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(migration)); err == nil {
+			t.Errorf("migration ran on a v%d database", version)
+		}
+		db.Close()
 	}
 }

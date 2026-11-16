@@ -16,7 +16,7 @@ func TestMetricDeferralsCountAndEndAtTheCap(t *testing.T) {
 	if _, err := s.SeedMetricJobs(ctx, "a", at); err != nil {
 		t.Fatal(err)
 	}
-	now := at.Add(time.Hour)
+	now := at.Add(15 * time.Minute)
 	for i := 1; i <= store.MaxMetricAttempts; i++ {
 		jobs, err := s.ClaimMetricJobs(ctx, "a", now, time.Minute, 1)
 		if err != nil || len(jobs) != 1 || jobs[0].Attempts != max(i-2, 0) {
@@ -32,7 +32,7 @@ func TestMetricDeferralsCountAndEndAtTheCap(t *testing.T) {
 		now = now.Add(time.Minute)
 	}
 	var open int
-	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM metric_jobs WHERE window_hours=1 AND completed_at IS NULL`).Scan(&open); err != nil || open != 1 {
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM metric_jobs WHERE window_minutes=15 AND completed_at IS NULL`).Scan(&open); err != nil || open != 1 {
 		t.Fatalf("the uncounted deferral should leave the job open once more: open=%d err=%v", open, err)
 	}
 	jobs, err := s.ClaimMetricJobs(ctx, "a", now, time.Minute, 1)
@@ -43,7 +43,7 @@ func TestMetricDeferralsCountAndEndAtTheCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reason string
-	if err = s.DB().QueryRow(`SELECT reason FROM metric_jobs WHERE window_hours=1 AND completed_at IS NOT NULL`).Scan(&reason); err != nil || reason != "read_failed" {
+	if err = s.DB().QueryRow(`SELECT reason FROM metric_jobs WHERE window_minutes=15 AND completed_at IS NOT NULL`).Scan(&reason); err != nil || reason != "read_failed" {
 		t.Fatalf("job should end with its last reason: %q %v", reason, err)
 	}
 }

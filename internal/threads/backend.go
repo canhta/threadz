@@ -47,8 +47,9 @@ type Backend interface {
 	// ReadAccountInsights returns the account's daily views and window totals
 	// over since..until.
 	ReadAccountInsights(ctx context.Context, since, until time.Time) (AccountInsights, error)
-	// ReadActionMetrics returns the insights of the own post with a media id.
-	ReadActionMetrics(context.Context, string) (Metrics, error)
+	// ReadActionMetricsBatch returns the insights of the own posts with the given
+	// media ids, one entry per id: a failed id does not fail the others.
+	ReadActionMetricsBatch(context.Context, []string) map[string]ActionMetricsResult
 	PublishingLimit(context.Context) (Quota, error)
 	// Post publishes a post under an optional topic tag (text, topic).
 	Post(context.Context, string, string) (Published, error)

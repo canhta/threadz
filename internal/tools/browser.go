@@ -68,8 +68,8 @@ func (d *Dispatcher) browserRead(ctx context.Context, tool, operation string, a 
 		since, until := threads.AccountWindow(started, int(a.Int("days")))
 		return d.opts.Threads.ReadAccountInsights(ctx, since, until)
 	case threads.OpReadOwnMetrics:
-		if a.Int("action_id") > 0 {
-			return d.actionMetrics(ctx, a.Int("action_id"))
+		if ids := a.IDList("action_ids"); len(ids) > 0 {
+			return d.actionMetrics(ctx, ids)
 		}
 		own, err := d.opts.Threads.ReadOwnMetrics(ctx)
 		if err == nil && own.FollowersSource != "" {
@@ -137,29 +137,88 @@ func (d *Dispatcher) observeStops(ctx context.Context, operation string, page th
 	return nil
 }
 
-// ActionMetrics retains the local action binding in the untrusted result. The
-// processor verifies it before committing metric samples. AuthorReplied is
-// nil unless the action is a reply whose target author's answer could be read.
+// ActionMetrics is one action of a batch read, bound to its local action id.
+// The processor verifies the binding before committing a sample. Failure is one
+// of the Failure constants and leaves the counters unset. AuthorReplied is nil
+// unless the action is a reply whose target author's answer could be read.
 type ActionMetrics struct {
 	ActionID int64 `json:"action_id"`
 	threads.Metrics
-	AuthorReplied *bool `json:"author_replied,omitempty"`
+	AuthorReplied *bool  `json:"author_replied,omitempty"`
+	Failure       string `json:"failure,omitempty"`
 }
 
-func (d *Dispatcher) actionMetrics(ctx context.Context, actionID int64) (any, error) {
-	action, ok, err := d.opts.Store.ConfirmedAction(ctx, d.opts.Template.ID, actionID)
-	if err != nil {
-		return nil, fmt.Errorf("reading own metric action: %w", err)
+// Reason codes a batch read gives for an action it could not measure.
+const (
+	FailureUnavailable = "metrics_unavailable"
+	FailureNotFound    = "media_not_found"
+	FailureAuth        = "auth_required"
+	FailureRead        = "read_failed"
+)
+
+func metricFailure(err error) string {
+	switch {
+	case errors.Is(err, threads.ErrMetricsUnavailable):
+		return FailureUnavailable
+	case errors.Is(err, threads.ErrMediaNotFound):
+		return FailureNotFound
 	}
-	if !ok {
-		return nil, threads.ErrMetricsUnavailable
+	return FailureRead
+}
+
+// actionMetrics reads the own actions' insights in one batched call. A
+// cancellation or a logged-out or captcha source fails the call (the last two
+// stop the agent); any other failure marks its action and leaves the rest.
+func (d *Dispatcher) actionMetrics(ctx context.Context, actionIDs []int64) (any, error) {
+	out := make([]ActionMetrics, len(actionIDs))
+	actions := make(map[int64]store.ConfirmedAction, len(actionIDs))
+	var media []string
+	for i, id := range actionIDs {
+		out[i].ActionID = id
+		action, ok, err := d.opts.Store.ConfirmedAction(ctx, d.opts.Template.ID, id)
+		if err != nil {
+			return nil, fmt.Errorf("reading own metric action: %w", err)
+		}
+		if !ok {
+			out[i].Failure = FailureUnavailable
+			continue
+		}
+		actions[id] = action
+		media = append(media, action.MediaID)
 	}
-	call, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	values, err := d.opts.Threads.ReadActionMetrics(call, action.MediaID)
-	if err != nil {
-		return nil, err
+	read := map[string]threads.ActionMetricsResult{}
+	if len(media) > 0 {
+		calls := (len(media) + threads.InsightsBatchIDs - 1) / threads.InsightsBatchIDs
+		call, cancel := context.WithTimeout(ctx, time.Duration(calls)*30*time.Second)
+		defer cancel()
+		read = d.opts.Threads.ReadActionMetricsBatch(call, media)
 	}
+	for i := range out {
+		action, ok := actions[out[i].ActionID]
+		if !ok {
+			continue
+		}
+		res, ok := read[action.MediaID]
+		if !ok {
+			res.Err = threads.ErrMetricsUnavailable
+		}
+		if errors.Is(res.Err, context.Canceled) || errors.Is(res.Err, context.DeadlineExceeded) || errors.Is(res.Err, threads.ErrLoggedOut) || errors.Is(res.Err, threads.ErrCaptcha) {
+			return nil, res.Err
+		}
+		if res.Err != nil {
+			out[i].Failure = metricFailure(res.Err)
+			continue
+		}
+		if err := d.finishActionMetrics(ctx, action, res.Metrics, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// finishActionMetrics validates the counters and, for a reply, reads whether the
+// target author answered.
+func (d *Dispatcher) finishActionMetrics(ctx context.Context, action store.ConfirmedAction, values threads.Metrics, out *ActionMetrics) error {
 	counts := []int64{values.Views, values.Likes, values.Replies, values.Reposts}
 	for _, p := range []*int64{values.Quotes, values.Shares} {
 		if p != nil {
@@ -168,14 +227,17 @@ func (d *Dispatcher) actionMetrics(ctx context.Context, actionID int64) (any, er
 	}
 	for _, count := range counts {
 		if count < 0 || count > 1<<53 {
-			return nil, threads.ErrMetricsUnavailable
+			out.Failure = FailureUnavailable
+			return nil
 		}
 	}
-	out := ActionMetrics{ActionID: actionID, Metrics: values}
+	out.Metrics = values
 	if action.Kind == "reply" && action.TargetUsername != "" {
+		call, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
 		if page, readErr := d.opts.Threads.ReadReplies(call, action.MediaID); readErr == nil {
-			if err = d.observeStops(ctx, threads.OpReadReplies, page); err != nil {
-				return nil, err
+			if err := d.observeStops(ctx, threads.OpReadReplies, page); err != nil {
+				return err
 			}
 			replied := false
 			for _, post := range page.Posts {
@@ -184,7 +246,7 @@ func (d *Dispatcher) actionMetrics(ctx context.Context, actionID int64) (any, er
 			out.AuthorReplied = &replied
 		}
 	}
-	return out, nil
+	return nil
 }
 
 func (d *Dispatcher) browserAction(ctx context.Context, operation string, a arguments) (data any, err error) {

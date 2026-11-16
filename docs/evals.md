@@ -331,17 +331,18 @@ deletes its own temporary DB, and writes `simulation.json`, `events.jsonl` and t
 Configured `run` polls metrics through the serial scheduler; this command only reproduces synthetic
 evidence.
 
-The `metrics` cases run the real processor, guarded dispatcher and SQLite jobs for all three windows,
+The `metrics` cases run the real processor, guarded dispatcher and SQLite jobs for every window,
 restart and catch-up, agent and action isolation, cancellation, missing data, and transactional DB
 failure and retry, plus the 72-hour simulation. No model is called, so usage and cost are zero.
 Reports separate logical hours and stored sample/target counts from wall-clock duration. Live mode
 rejects them.
 
-At 72 logical hours the simulation has seven confirmed synthetic actions, 21 completed targets and
-19 stored samples. An initially overdue action coalesces three targets into one actual observation.
+At 72 logical hours the simulation has seven confirmed synthetic actions, 63 completed targets (the
+ones after a flat action's 24 h sample settle) and 32 stored samples. An initially overdue action
+coalesces its six overdue targets into one actual observation.
 
 One guarded read before a simulated crash is repeated safely after a file DB close and reopen with
-an expired lease. That run audits 20 source reads: 19 action reads and the crash read. A batch reads no account
+an expired lease. That run audits 31 source reads: 30 batched action reads and the crash read. A batch reads no account
 metrics; it stamps samples with the recorded follower count. It takes one restart, with no duplicate
 checkpoint or sample and no change to agent scheduling.
 

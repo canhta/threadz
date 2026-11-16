@@ -39,8 +39,8 @@ func TestSchedulerPollsMetricsBeforeAgentChosen24HourWake(t *testing.T) {
 	}
 	waited := time.Duration(0)
 	err = (agent.Scheduler{Agents: []*agent.Runtime{r}, Now: clock, Wait: func(ctx context.Context, d time.Duration) error { now = now.Add(d); waited += d; return ctx.Err() }}).Run(ctx, true)
-	if err != nil || waited != time.Hour {
-		t.Fatalf("metrics missed 1h target: waited=%v err=%v", waited, err)
+	if err != nil || waited != 15*time.Minute {
+		t.Fatalf("metrics missed first target: waited=%v err=%v", waited, err)
 	}
 	state, err := st.AgentState(ctx, tmpl.ID)
 	if err != nil || !state.NextWake.Equal(start.Add(24*time.Hour)) {

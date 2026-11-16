@@ -271,7 +271,7 @@ func TestCtlContextIsWhatTheNextWakeSends(t *testing.T) {
 						t.Fatal(err)
 					}
 					id, _ := res.LastInsertId()
-					for _, q := range []string{`INSERT INTO metrics(agent_id,action_id,measured_at) VALUES(?,?,?)`, `INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES(?,?,6,?3,?3,?3) ON CONFLICT(agent_id,action_id,window_hours) DO UPDATE SET completed_at=excluded.completed_at,claimed_at=NULL,lease_until=NULL`} {
+					for _, q := range []string{`INSERT INTO metrics(agent_id,action_id,measured_at) VALUES(?,?,?)`, `INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES(?,?,360,?3,?3,?3) ON CONFLICT(agent_id,action_id,window_minutes) DO UPDATE SET completed_at=excluded.completed_at,claimed_at=NULL,lease_until=NULL`} {
 						if _, err = s.st.DB().Exec(q, s.id, id, measured); err != nil {
 							t.Fatal(err)
 						}

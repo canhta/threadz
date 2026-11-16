@@ -16,7 +16,7 @@ flowchart TD
   K -->|fail, under 3 tries| W
   K -->|still failing| X[critic_rejected]
   G --> U[Publish: API or browser]
-  U --> M[Metrics at 1h, 6h, 24h]
+  U --> M[Metrics from 15 min to 168 h]
 ```
 
 | Stage | Call | Input | Output |

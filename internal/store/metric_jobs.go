@@ -3,14 +3,28 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"time"
 )
 
-// MetricWindows are the hours after publication at which an action is measured.
-var MetricWindows = []int{1, 6, 24}
+// MetricWindowMinutes are the minutes after publication at which an action is
+// measured; schema.sql constrains metric_jobs.window_minutes to this list.
+var MetricWindowMinutes = []int{15, 60, 180, 360, 720, 1440, 2880, 5760, 10080}
+
+// CohortWindowMinutes are the windows whose samples are episodes: actions are
+// compared with each other only at the same age.
+var CohortWindowMinutes = []int{60, 360, 1440}
+
+// settleAfterMinutes is the first window at which a flat action stops being measured.
+const settleAfterMinutes = 1440
+
+// settleViewsPercent is the largest growth in views, in percent of the newest
+// count, between the last two samples of a settled action; likes and replies
+// must not have changed at all.
+const settleViewsPercent = 2
 
 // MetricValues contains counters measured together for one published action.
 // A nil Quotes, Shares, Followers or AuthorReplied is unavailable, never zero.
@@ -22,13 +36,13 @@ type MetricValues struct {
 
 // MetricJob identifies an immutable measurement target and its current fence.
 type MetricJob struct {
-	AgentID      string
-	ActionID     int64
-	WindowHours  int
-	DueAt        time.Time
-	PostedAt     time.Time
-	ThreadURL    string
-	ClaimVersion int64
+	AgentID       string
+	ActionID      int64
+	WindowMinutes int
+	DueAt         time.Time
+	PostedAt      time.Time
+	ThreadURL     string
+	ClaimVersion  int64
 	// Attempts counts the deferrals that blamed the read, not the source.
 	Attempts int
 }
@@ -81,9 +95,9 @@ func (s *Store) SeedMetricJobs(ctx context.Context, agentID string, now time.Tim
 			return fmt.Errorf("reading metric actions: %w", err)
 		}
 		for _, a := range actions {
-			for _, hours := range MetricWindows {
-				due := formatTime(a.at.Add(time.Duration(hours) * time.Hour))
-				r, err := conn.ExecContext(ctx, `INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before) VALUES(?,?,?,?,?) ON CONFLICT(agent_id,action_id,window_hours) DO NOTHING`, agentID, a.id, hours, due, due)
+			for _, minutes := range MetricWindowMinutes {
+				due := formatTime(a.at.Add(time.Duration(minutes) * time.Minute))
+				r, err := conn.ExecContext(ctx, `INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before) VALUES(?,?,?,?,?) ON CONFLICT(agent_id,action_id,window_minutes) DO NOTHING`, agentID, a.id, minutes, due, due)
 				if err != nil {
 					return fmt.Errorf("seeding metric target: %w", err)
 				}
@@ -137,14 +151,14 @@ func (s *Store) ClaimMetricJobs(ctx context.Context, agentID string, now time.Ti
 			if _, err = conn.ExecContext(ctx, `UPDATE metric_jobs SET claim_version=?,claimed_at=?,lease_until=?,reason='' WHERE agent_id=? AND action_id=? AND completed_at IS NULL AND due_at<=? AND not_before<=?`, version, stamp, formatTime(now.Add(lease)), agentID, id, stamp, stamp); err != nil {
 				return fmt.Errorf("leasing metric targets: %w", err)
 			}
-			rows, err = conn.QueryContext(ctx, `SELECT j.window_hours,j.due_at,a.posted_at,a.thread_url,j.attempts FROM metric_jobs j JOIN actions a ON a.id=j.action_id AND a.agent_id=j.agent_id WHERE j.agent_id=? AND j.action_id=? AND j.claim_version=? AND j.completed_at IS NULL ORDER BY j.window_hours`, agentID, id, version)
+			rows, err = conn.QueryContext(ctx, `SELECT j.window_minutes,j.due_at,a.posted_at,a.thread_url,j.attempts FROM metric_jobs j JOIN actions a ON a.id=j.action_id AND a.agent_id=j.agent_id WHERE j.agent_id=? AND j.action_id=? AND j.claim_version=? AND j.completed_at IS NULL ORDER BY j.window_minutes`, agentID, id, version)
 			if err != nil {
 				return fmt.Errorf("reading leased metrics: %w", err)
 			}
 			for rows.Next() {
 				job := MetricJob{AgentID: agentID, ActionID: id, ClaimVersion: version}
 				var due, posted string
-				if err = rows.Scan(&job.WindowHours, &due, &posted, &job.ThreadURL, &job.Attempts); err != nil {
+				if err = rows.Scan(&job.WindowMinutes, &due, &posted, &job.ThreadURL, &job.Attempts); err != nil {
 					rows.Close()
 					return fmt.Errorf("reading leased metric: %w", err)
 				}
@@ -154,7 +168,7 @@ func (s *Store) ClaimMetricJobs(ctx context.Context, agentID string, now time.Ti
 					return errors.New("claiming metrics: invalid target timestamp")
 				}
 				job.PostedAt, err = parseTime(posted)
-				if err != nil || !validTime(job.PostedAt) || !job.DueAt.Equal(job.PostedAt.Add(time.Duration(job.WindowHours)*time.Hour)) {
+				if err != nil || !validTime(job.PostedAt) || !job.DueAt.Equal(job.PostedAt.Add(time.Duration(job.WindowMinutes)*time.Minute)) {
 					rows.Close()
 					return errors.New("claiming metrics: invalid published timestamp")
 				}
@@ -194,7 +208,7 @@ func (s *Store) NextMetricDue(ctx context.Context, agentID string) (time.Time, b
 // metricClaims checks the full claim set and immutable action binding while the
 // writer lock is held. It returns true only for the same already-completed set.
 func metricClaims(ctx context.Context, conn *sql.Conn, jobs []MetricJob, at time.Time, requireRunning bool) (bool, error) {
-	if len(jobs) < 1 || len(jobs) > 3 || !validTime(at) {
+	if len(jobs) < 1 || len(jobs) > len(MetricWindowMinutes) || !validTime(at) {
 		return false, ErrMetricClaim
 	}
 	first := jobs[0]
@@ -203,13 +217,13 @@ func metricClaims(ctx context.Context, conn *sql.Conn, jobs []MetricJob, at time
 	}
 	wanted := make(map[int]MetricJob, len(jobs))
 	for _, job := range jobs {
-		if job.AgentID != first.AgentID || job.ActionID != first.ActionID || job.ClaimVersion != first.ClaimVersion || !slices.Contains(MetricWindows, job.WindowHours) {
+		if job.AgentID != first.AgentID || job.ActionID != first.ActionID || job.ClaimVersion != first.ClaimVersion || !slices.Contains(MetricWindowMinutes, job.WindowMinutes) {
 			return false, ErrMetricClaim
 		}
-		if _, ok := wanted[job.WindowHours]; ok {
+		if _, ok := wanted[job.WindowMinutes]; ok {
 			return false, ErrMetricClaim
 		}
-		wanted[job.WindowHours] = job
+		wanted[job.WindowMinutes] = job
 	}
 	var posted, url, status string
 	var dry int
@@ -224,29 +238,29 @@ func metricClaims(ctx context.Context, conn *sql.Conn, jobs []MetricJob, at time
 	if err != nil || !validTime(postedAt) || dry != 0 || url == "" {
 		return false, ErrMetricClaim
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT window_hours,due_at,claim_version,claimed_at,lease_until,completed_at FROM metric_jobs WHERE agent_id=? AND action_id=?`, first.AgentID, first.ActionID)
+	rows, err := conn.QueryContext(ctx, `SELECT window_minutes,due_at,claim_version,claimed_at,lease_until,completed_at FROM metric_jobs WHERE agent_id=? AND action_id=?`, first.AgentID, first.ActionID)
 	if err != nil {
 		return false, fmt.Errorf("reading metric fences: %w", err)
 	}
 	defer rows.Close()
 	found, completed, leased := 0, 0, 0
 	for rows.Next() {
-		var hours int
+		var minutes int
 		var due string
 		var version int64
 		var start, lease, done sql.NullString
-		if err = rows.Scan(&hours, &due, &version, &start, &lease, &done); err != nil {
+		if err = rows.Scan(&minutes, &due, &version, &start, &lease, &done); err != nil {
 			return false, fmt.Errorf("reading metric fence: %w", err)
 		}
 		if !done.Valid && lease.Valid {
 			leased++
 		}
-		job, ok := wanted[hours]
+		job, ok := wanted[minutes]
 		if !ok {
 			continue
 		}
 		found++
-		if version != job.ClaimVersion || !job.PostedAt.Equal(postedAt) || job.ThreadURL != url || !job.DueAt.Equal(postedAt.Add(time.Duration(hours)*time.Hour)) || formatTime(job.DueAt) != due {
+		if version != job.ClaimVersion || !job.PostedAt.Equal(postedAt) || job.ThreadURL != url || !job.DueAt.Equal(postedAt.Add(time.Duration(minutes)*time.Minute)) || formatTime(job.DueAt) != due {
 			return false, ErrMetricClaim
 		}
 		if done.Valid {
@@ -301,7 +315,7 @@ func (s *Store) CompleteMetricJobs(ctx context.Context, jobs []MetricJob, at tim
 			return fmt.Errorf("inserting metric sample: %w", err)
 		}
 		for _, job := range jobs {
-			r, err := conn.ExecContext(ctx, `UPDATE metric_jobs SET completed_at=?,claimed_at=NULL,lease_until=NULL,reason='' WHERE agent_id=? AND action_id=? AND window_hours=? AND claim_version=? AND completed_at IS NULL`, measured, job.AgentID, job.ActionID, job.WindowHours, job.ClaimVersion)
+			r, err := conn.ExecContext(ctx, `UPDATE metric_jobs SET completed_at=?,claimed_at=NULL,lease_until=NULL,reason='' WHERE agent_id=? AND action_id=? AND window_minutes=? AND claim_version=? AND completed_at IS NULL`, measured, job.AgentID, job.ActionID, job.WindowMinutes, job.ClaimVersion)
 			if err != nil {
 				return fmt.Errorf("completing metric checkpoint: %w", err)
 			}
@@ -313,6 +327,9 @@ func (s *Store) CompleteMetricJobs(ctx context.Context, jobs []MetricJob, at tim
 				return ErrMetricClaim
 			}
 		}
+		if err = settleMetricJobs(ctx, conn, jobs, measured, values); err != nil {
+			return err
+		}
 		committed = true
 		return nil
 	})
@@ -322,6 +339,73 @@ func (s *Store) CompleteMetricJobs(ctx context.Context, jobs []MetricJob, at tim
 	return committed, nil
 }
 
+// settleMetricJobs ends the remaining jobs of the action with reason settled
+// when a sample at or after the settle window differs from the one before it by
+// less than settleViewsPercent of its views and by nothing in likes and replies.
+func settleMetricJobs(ctx context.Context, conn *sql.Conn, jobs []MetricJob, measured string, values MetricValues) error {
+	if !slices.ContainsFunc(jobs, func(j MetricJob) bool { return j.WindowMinutes >= settleAfterMinutes }) {
+		return nil
+	}
+	first := jobs[0]
+	var views, likes, replies int64
+	err := conn.QueryRowContext(ctx, `SELECT views,likes,replies FROM metrics WHERE action_id=? AND measured_at<? ORDER BY measured_at DESC LIMIT 1`, first.ActionID, measured).Scan(&views, &likes, &replies)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading previous metric sample: %w", err)
+	}
+	grown := max(values.Views-views, views-values.Views)
+	if likes != values.Likes || replies != values.Replies || (grown != 0 && grown*100 >= settleViewsPercent*values.Views) {
+		return nil
+	}
+	if _, err = conn.ExecContext(ctx, `UPDATE metric_jobs SET completed_at=?,claimed_at=NULL,lease_until=NULL,reason='settled' WHERE agent_id=? AND action_id=? AND completed_at IS NULL`, measured, first.AgentID, first.ActionID); err != nil {
+		return fmt.Errorf("settling metric targets: %w", err)
+	}
+	return nil
+}
+
+// YoungOwnActions returns those of ids that are confirmed actions of the agent
+// posted at or after since, in id order.
+func (s *Store) YoungOwnActions(ctx context.Context, agentID string, ids []int64, since time.Time) ([]int64, error) {
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading young actions: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM actions WHERE agent_id=? AND dry_run=0 AND trim(thread_url)<>'' AND media_id<>'' AND julianday(posted_at)>=julianday(?) AND id IN (SELECT value FROM json_each(?)) ORDER BY id`, agentID, formatTime(since), string(list))
+	if err != nil {
+		return nil, fmt.Errorf("reading young actions: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("reading young action: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// RecordMetricSample stores a sample taken outside the schedule for a
+// confirmed own action and leaves its jobs as they are.
+func (s *Store) RecordMetricSample(ctx context.Context, agentID string, actionID int64, at time.Time, values MetricValues) error {
+	if agentID == "" || actionID <= 0 || !validTime(at) {
+		return errors.New("recording metric sample: invalid options")
+	}
+	return s.write(ctx, func(conn *sql.Conn) error {
+		r, err := conn.ExecContext(ctx, `INSERT INTO metrics(agent_id,action_id,measured_at,views,likes,replies,reposts,quotes,shares,followers,author_replied) SELECT a.agent_id,a.id,?,?,?,?,?,?,?,?,? FROM actions a WHERE a.id=? AND a.agent_id=? AND a.dry_run=0 AND trim(a.thread_url)<>''`, formatStoreTimestamp(at), values.Views, values.Likes, values.Replies, values.Reposts, values.Quotes, values.Shares, values.Followers, values.AuthorReplied, actionID, agentID)
+		if err != nil {
+			return fmt.Errorf("inserting metric sample: %w", err)
+		}
+		if n, err := r.RowsAffected(); err != nil || n != 1 {
+			return errors.New("recording metric sample: unknown action")
+		}
+		return nil
+	})
+}
+
 // MaxMetricAttempts is how many counted deferrals a job takes before it ends
 // with the reason of the last one, so a post that cannot be read stops retrying.
 const MaxMetricAttempts = 8
@@ -329,7 +413,7 @@ const MaxMetricAttempts = 8
 // MetricReasonCode reports whether reason is a stored metric job reason.
 func MetricReasonCode(reason string) bool {
 	switch reason {
-	case "metrics_unavailable", "source_unavailable", "read_failed", "binding_mismatch", "auth_required", "cancelled", "persistence_failed", "measurement_failed", "media_gone":
+	case "metrics_unavailable", "source_unavailable", "read_failed", "binding_mismatch", "auth_required", "cancelled", "persistence_failed", "measurement_failed", "media_gone", "settled":
 		return true
 	}
 	return false
@@ -340,7 +424,7 @@ func MetricReasonCode(reason string) bool {
 // A deferral that is not the source's or the owner's fault counts as an attempt;
 // the MaxMetricAttempts-th one ends the job.
 func (s *Store) DeferMetricJobs(ctx context.Context, jobs []MetricJob, now, next time.Time, reason string) error {
-	if !MetricReasonCode(reason) || reason == "media_gone" {
+	if !MetricReasonCode(reason) || reason == "media_gone" || reason == "settled" {
 		return errors.New("deferring metrics: invalid reason code")
 	}
 	if !validTime(now) || !validTime(next) || !next.After(now) {
@@ -359,7 +443,7 @@ func (s *Store) DeferMetricJobs(ctx context.Context, jobs []MetricJob, now, next
 			return ErrMetricClaim
 		}
 		for _, job := range jobs {
-			r, err := conn.ExecContext(ctx, `UPDATE metric_jobs SET not_before=?,claimed_at=NULL,lease_until=NULL,reason=?,attempts=attempts+?,completed_at=CASE WHEN attempts+?>=? THEN ? END WHERE agent_id=? AND action_id=? AND window_hours=? AND claim_version=? AND completed_at IS NULL`, formatTime(next), reason, counted, counted, MaxMetricAttempts, formatStoreTimestamp(now), job.AgentID, job.ActionID, job.WindowHours, job.ClaimVersion)
+			r, err := conn.ExecContext(ctx, `UPDATE metric_jobs SET not_before=?,claimed_at=NULL,lease_until=NULL,reason=?,attempts=attempts+?,completed_at=CASE WHEN attempts+?>=? THEN ? END WHERE agent_id=? AND action_id=? AND window_minutes=? AND claim_version=? AND completed_at IS NULL`, formatTime(next), reason, counted, counted, MaxMetricAttempts, formatStoreTimestamp(now), job.AgentID, job.ActionID, job.WindowMinutes, job.ClaimVersion)
 			if err != nil {
 				return fmt.Errorf("deferring metric target: %w", err)
 			}

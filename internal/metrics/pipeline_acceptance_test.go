@@ -27,13 +27,15 @@ type pipelineClock struct{ now time.Time }
 func (c *pipelineClock) Now() time.Time { return c.now }
 
 // pipelineSource reads the Memory the pipeline must use only for per-action
-// samples; every other operation it served is evidence of a bug.
+// samples, one batched call per run; every other operation it served is
+// evidence of a bug.
 type pipelineSource struct{ *threads.Memory }
 
+// actionURLs holds the comma separated media ids of each batched read.
 func (s pipelineSource) actionURLs() []string {
 	urls := []string{}
 	for _, c := range s.Calls() {
-		if c.Op == threads.OpReadOwnMetrics && c.Arg != "" {
+		if c.Op == threads.OpReadActionMetrics {
 			urls = append(urls, c.Arg)
 		}
 	}
@@ -42,7 +44,7 @@ func (s pipelineSource) actionURLs() []string {
 func (s pipelineSource) readCount() int     { return len(s.actionURLs()) }
 func (s pipelineSource) readURLs() []string { return s.actionURLs() }
 func (s pipelineSource) aggregateCount() int {
-	return s.Count(threads.OpReadOwnMetrics) - s.readCount()
+	return s.Count(threads.OpReadOwnMetrics)
 }
 func (s pipelineSource) writeCount() int { return s.Count(threads.OpPost) + s.Count(threads.OpReply) }
 func (s pipelineSource) closeCount() int { return s.Count(threads.OpClose) }
@@ -296,7 +298,7 @@ var pipelineSafeReasons = map[string]bool{
 func (h *pipelineHarness) assertDeferred(agentID string, actionID int64) {
 	h.t.Helper()
 	var reason string
-	if err := h.store.DB().QueryRow(`SELECT reason FROM metric_jobs WHERE agent_id=? AND action_id=? AND window_hours=1`, agentID, actionID).Scan(&reason); err != nil {
+	if err := h.store.DB().QueryRow(`SELECT reason FROM metric_jobs WHERE agent_id=? AND action_id=? AND window_minutes=15`, agentID, actionID).Scan(&reason); err != nil {
 		h.t.Fatalf("reading metric deferral reason: %v", err)
 	}
 	if !pipelineSafeReasons[reason] {
@@ -311,7 +313,7 @@ func (h *pipelineHarness) assertDeferred(agentID string, actionID int64) {
 	}
 }
 
-func TestPipelineCoversThreeWindowsForMultipleActionsAndAgents(t *testing.T) {
+func TestPipelineCoversEveryWindowForMultipleActionsAndAgents(t *testing.T) {
 	h := newPipelineHarness(t, "pipeline-a")
 	h.addAgent("pipeline-b")
 	t0 := h.clock.now
@@ -332,21 +334,22 @@ func TestPipelineCoversThreeWindowsForMultipleActionsAndAgents(t *testing.T) {
 		h.insertAction(a.id, a.agent, t0, a.url, false)
 	}
 
-	for _, hours := range []int{1, 6, 24} {
-		windowAt := t0.Add(time.Duration(hours) * time.Hour)
+	windows := store.MetricWindowMinutes
+	for i, minutes := range windows {
+		windowAt := t0.Add(time.Duration(minutes) * time.Minute)
 		h.clock.now = windowAt
 		for _, agentID := range []string{"pipeline-a", "pipeline-b"} {
 			for _, a := range actions {
 				if a.agent == agentID {
 					values := a.values
-					values.Views += int64(hours * 1000)
+					values.Views += int64(minutes * 10)
 					h.source.Actions[mediaID(a.url)] = values
 				}
 			}
 			p := h.newProcessor(agentID, true, nil)
 			result, err := p.RunDue(h.ctx)
 			if err != nil {
-				t.Fatalf("%s at %dh: %v", agentID, hours, err)
+				t.Fatalf("%s at %dm: %v", agentID, minutes, err)
 			}
 			want := 0
 			for _, a := range actions {
@@ -355,21 +358,18 @@ func TestPipelineCoversThreeWindowsForMultipleActionsAndAgents(t *testing.T) {
 				}
 			}
 			if result.ClaimedJobs != want || result.Samples != want || result.DeferredJobs != 0 {
-				t.Fatalf("%s at %dh result = %+v, want %d jobs/samples", agentID, hours, result, want)
+				t.Fatalf("%s at %dm result = %+v, want %d jobs/samples", agentID, minutes, result, want)
 			}
 			due, ok, err := p.NextDue(h.ctx)
 			if err != nil {
-				t.Fatalf("%s next due at %dh: %v", agentID, hours, err)
+				t.Fatalf("%s next due at %dm: %v", agentID, minutes, err)
 			}
-			if hours == 24 {
+			if i == len(windows)-1 {
 				if ok {
 					t.Fatalf("%s still due at %v after the last window", agentID, due)
 				}
-			} else {
-				nextWindow := map[int]int{1: 6, 6: 24}[hours]
-				if wantAt := t0.Add(time.Duration(nextWindow) * time.Hour); !ok || !due.Equal(wantAt) {
-					t.Fatalf("%s next due at %dh = %v,%v want %v", agentID, hours, due, ok, wantAt)
-				}
+			} else if wantAt := t0.Add(time.Duration(windows[i+1]) * time.Minute); !ok || !due.Equal(wantAt) {
+				t.Fatalf("%s next due at %dm = %v,%v want %v", agentID, minutes, due, ok, wantAt)
 			}
 		}
 	}
@@ -382,16 +382,16 @@ func TestPipelineCoversThreeWindowsForMultipleActionsAndAgents(t *testing.T) {
 				actionSamples = append(actionSamples, sample)
 			}
 		}
-		if len(actionSamples) != 3 {
+		if len(actionSamples) != len(windows) {
 			t.Fatalf("action %d samples = %+v", a.id, actionSamples)
 		}
-		for i, hours := range []int{1, 6, 24} {
-			wantAt := t0.Add(time.Duration(hours) * time.Hour)
+		for i, minutes := range windows {
+			wantAt := t0.Add(time.Duration(minutes) * time.Minute)
 			if !actionSamples[i].MeasuredAt.Equal(wantAt) {
-				t.Fatalf("action %d window %dh measured at %v, want %v", a.id, hours, actionSamples[i].MeasuredAt, wantAt)
+				t.Fatalf("action %d window %dm measured at %v, want %v", a.id, minutes, actionSamples[i].MeasuredAt, wantAt)
 			}
-			if actionSamples[i].Views != a.values.Views+int64(hours*1000) {
-				t.Fatalf("action %d window %dh views = %d", a.id, hours, actionSamples[i].Views)
+			if actionSamples[i].Views != a.values.Views+int64(minutes*10) {
+				t.Fatalf("action %d window %dm views = %d", a.id, minutes, actionSamples[i].Views)
 			}
 		}
 		var storedURL string
@@ -406,8 +406,8 @@ func TestPipelineCoversThreeWindowsForMultipleActionsAndAgents(t *testing.T) {
 	if h.source.writeCount() != 0 {
 		t.Fatalf("action writes = %d", h.source.writeCount())
 	}
-	if got := h.source.readCount(); got != len(actions)*3 {
-		t.Fatalf("action reads = %d, want %d", got, len(actions)*3)
+	if got := h.source.readCount(); got != 2*len(windows) {
+		t.Fatalf("source reads = %d, want one batched read per agent and window (%d)", got, 2*len(windows))
 	}
 	if h.source.closeCount() != h.factories {
 		t.Fatalf("browser closes = %d, factories = %d", h.source.closeCount(), h.factories)
@@ -420,7 +420,7 @@ func TestPipelineCoversThreeWindowsForMultipleActionsAndAgents(t *testing.T) {
 	h.assertMetricsWakesClosed("pipeline-b")
 
 	// One more run after the last completed target must not read or sample.
-	h.clock.now = t0.Add(25 * time.Hour)
+	h.clock.now = t0.Add(time.Duration(windows[len(windows)-1])*time.Minute + time.Hour)
 	before := h.source.readCount()
 	p := h.newProcessor("pipeline-a", true, nil)
 	result, err := p.RunDue(h.ctx)
@@ -442,13 +442,13 @@ func TestPipelineLateCatchUpCoalescesToOneCurrentSampleAndRestartIsIdempotent(t 
 	h.insertAction(actionID, "pipeline-late", t0, threadURL, false)
 	h.source.Actions[mediaID(threadURL)] = threads.Metrics{Views: 501, Likes: 51, Replies: 5, Reposts: 1}
 
-	h.clock.now = t0.Add(25 * time.Hour)
+	h.clock.now = t0.Add(time.Duration(store.MetricWindowMinutes[len(store.MetricWindowMinutes)-1])*time.Minute + time.Hour)
 	p := h.newProcessor("pipeline-late", true, nil)
 	result, err := p.RunDue(h.ctx)
 	if err != nil {
 		t.Fatalf("late catch-up: %v", err)
 	}
-	if result.ClaimedJobs != 3 || result.Samples != 1 || result.DeferredJobs != 0 {
+	if result.ClaimedJobs != len(store.MetricWindowMinutes) || result.Samples != 1 || result.DeferredJobs != 0 {
 		t.Fatalf("late catch-up result = %+v", result)
 	}
 	samples := h.samples("pipeline-late")
@@ -477,7 +477,7 @@ func TestPipelineLateCatchUpCoalescesToOneCurrentSampleAndRestartIsIdempotent(t 
 	}
 
 	h.reopen()
-	h.clock.now = t0.Add(25*time.Hour + time.Minute)
+	h.clock.now = t0.Add(200 * time.Hour)
 	restarted := h.newProcessor("pipeline-late", true, nil)
 	result, err = restarted.RunDue(h.ctx)
 	if err != nil || result.Samples != 0 || result.ClaimedJobs != 0 {
@@ -527,8 +527,8 @@ func TestPipelineDefersMissingUnavailableOrInvalidSourceWithoutSample(t *testing
 					h.source.Actions[mediaID(url)] = value
 				}
 			}
-			h.source.Errors[threads.OpReadOwnMetrics] = tc.err
-			h.clock.now = t0.Add(time.Hour)
+			h.source.Errors[threads.OpReadActionMetrics] = tc.err
+			h.clock.now = t0.Add(15 * time.Minute)
 			p := h.newProcessor("pipeline-defer", tc.withReader, nil)
 			result, err := p.RunDue(h.ctx)
 			if err != nil {
@@ -580,7 +580,7 @@ func TestPipelinePausedKilledCancellationAndDatabaseFailure(t *testing.T) {
 		if _, err := h.store.DB().Exec(`UPDATE agents SET status='paused' WHERE id='pipeline-paused'`); err != nil {
 			t.Fatal(err)
 		}
-		h.clock.now = t0.Add(time.Hour)
+		h.clock.now = t0.Add(15 * time.Minute)
 		p := h.newProcessor("pipeline-paused", true, nil)
 		result, err := p.RunDue(h.ctx)
 		if err != nil {
@@ -599,7 +599,7 @@ func TestPipelinePausedKilledCancellationAndDatabaseFailure(t *testing.T) {
 		if _, err := h.store.DB().Exec(`UPDATE agents SET status='killed' WHERE id='pipeline-killed'`); err != nil {
 			t.Fatal(err)
 		}
-		h.clock.now = t0.Add(time.Hour)
+		h.clock.now = t0.Add(15 * time.Minute)
 		p := h.newProcessor("pipeline-killed", true, nil)
 		result, err := p.RunDue(h.ctx)
 		if err != nil {
@@ -614,7 +614,7 @@ func TestPipelinePausedKilledCancellationAndDatabaseFailure(t *testing.T) {
 		h := newPipelineHarness(t, "pipeline-cancel")
 		t0 := h.clock.now
 		h.insertAction(503, "pipeline-cancel", t0, threadURL, false)
-		h.clock.now = t0.Add(time.Hour)
+		h.clock.now = t0.Add(15 * time.Minute)
 		ctx, cancel := context.WithCancel(h.ctx)
 		cancel()
 		p := h.newProcessor("pipeline-cancel", true, nil)
@@ -631,10 +631,10 @@ func TestPipelinePausedKilledCancellationAndDatabaseFailure(t *testing.T) {
 		h := newPipelineHarness(t, "pipeline-cancel-read")
 		t0 := h.clock.now
 		h.insertAction(504, "pipeline-cancel-read", t0, threadURL, false)
-		h.clock.now = t0.Add(time.Hour)
+		h.clock.now = t0.Add(15 * time.Minute)
 		ctx, cancel := context.WithCancel(h.ctx)
 		h.source.Hook = func(_ context.Context, c threads.Call) error {
-			if c.Arg != "" {
+			if c.Op == threads.OpReadActionMetrics {
 				cancel()
 			}
 			return nil
@@ -659,7 +659,7 @@ func TestPipelinePausedKilledCancellationAndDatabaseFailure(t *testing.T) {
 		h := newPipelineHarness(t, "pipeline-db")
 		t0 := h.clock.now
 		h.insertAction(505, "pipeline-db", t0, threadURL, false)
-		h.clock.now = t0.Add(time.Hour)
+		h.clock.now = t0.Add(15 * time.Minute)
 		p := h.newProcessor("pipeline-db", true, nil)
 		if err := h.store.Close(); err != nil {
 			t.Fatalf("closing store: %v", err)
@@ -685,7 +685,7 @@ func TestPipelineStaleLeaseRecoversWithFreshFenceAndOneSample(t *testing.T) {
 	if _, err := h.store.SeedMetricJobs(h.ctx, "pipeline-lease", time.Unix(0, 0)); err != nil {
 		t.Fatalf("seeding metric jobs: %v", err)
 	}
-	now := t0.Add(time.Hour)
+	now := t0.Add(15 * time.Minute)
 	stale, err := h.store.ClaimMetricJobs(h.ctx, "pipeline-lease", now, time.Minute, 10)
 	if err != nil || len(stale) != 1 {
 		t.Fatalf("stale claim = %+v err=%v", stale, err)
@@ -747,7 +747,7 @@ func TestPipelineUsesGuardedMetricsWakeAuditAndRedactedLogs(t *testing.T) {
 	)
 	h.insertAction(actionID, "pipeline-audit", t0, threadURL, false)
 	h.source.Actions[mediaID(threadURL)] = threads.Metrics{Views: 412, Likes: 19, Replies: 4, Reposts: 2}
-	h.clock.now = t0.Add(time.Hour)
+	h.clock.now = t0.Add(15 * time.Minute)
 	p := h.newProcessor("pipeline-audit", true, nil)
 	result, err := p.RunDue(h.ctx)
 	if err != nil || result.Samples != 1 {
@@ -820,8 +820,8 @@ func TestPipelineAuthPausesAgentAndQueuesNoticeWithoutSampleOrWrite(t *testing.T
 		threadURL = "https://threads.example/own/auth"
 	)
 	h.insertAction(actionID, "pipeline-auth", t0, threadURL, false)
-	h.source.Errors[threads.OpReadOwnMetrics] = threads.ErrLoggedOut
-	h.clock.now = t0.Add(time.Hour)
+	h.source.Errors[threads.OpReadActionMetrics] = threads.ErrLoggedOut
+	h.clock.now = t0.Add(15 * time.Minute)
 	p := h.newProcessor("pipeline-auth", true, nil)
 	result, err := p.RunDue(h.ctx)
 	if err != nil {

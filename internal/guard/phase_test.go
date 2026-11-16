@@ -212,10 +212,12 @@ func TestSpecParse(t *testing.T) {
 		t.Fatalf("args %+v err %v", args, err)
 	}
 	read, _ := guard.Spec("read_own_metrics")
-	if args, err = read.Parse(`{"action_id":7}`); err != nil || args.Int("action_id") != 7 {
-		t.Fatalf("action_id %+v %v", args, err)
+	if args, err = read.Parse(`{"action_ids":[7,9]}`); err != nil || len(args.IDList("action_ids")) != 2 || args.IDList("action_ids")[1] != 9 {
+		t.Fatalf("action_ids %+v %v", args, err)
 	}
-	if _, err = read.Parse(`{"action_id":0}`); err == nil {
-		t.Fatal("zero action_id accepted")
+	for _, bad := range []string{`{"action_ids":[0]}`, `{"action_id":7}`} {
+		if _, err = read.Parse(bad); err == nil {
+			t.Fatalf("%s accepted", bad)
+		}
 	}
 }

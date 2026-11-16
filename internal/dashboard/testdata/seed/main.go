@@ -286,12 +286,14 @@ func seed(ctx context.Context, s *store.Store, now time.Time) error {
 	posted := map[int64]time.Time{}
 	for _, e := range events {
 		posted[e.action] = e.at
-		for _, w := range []int{1, 6, 24} {
-			dues = append(dues, due{e.at.Add(time.Duration(w) * time.Hour), e.action, w})
+		for _, w := range store.MetricWindowMinutes {
+			if w <= 1440 {
+				dues = append(dues, due{e.at.Add(time.Duration(w) * time.Minute), e.action, w})
+			}
 		}
 	}
 	sort.Slice(dues, func(i, j int) bool { return dues[i].at.Before(dues[j].at) })
-	share := map[int]float64{1: 0.28, 6: 0.65, 24: 1}
+	share := map[int]float64{15: 0.12, 60: 0.28, 180: 0.45, 360: 0.65, 720: 0.82, 1440: 1}
 	for _, d := range dues {
 		at := d.at.Add(time.Minute)
 		if at.After(now) {
@@ -303,7 +305,7 @@ func seed(ctx context.Context, s *store.Store, now time.Time) error {
 			return fmt.Errorf("metric replay out of order at action %d", d.action)
 		}
 		r, f := results[d.action], followersAt(at)
-		x := share[jobs[len(jobs)-1].WindowHours]
+		x := share[jobs[len(jobs)-1].WindowMinutes]
 		sc := func(v int64) int64 { return int64(float64(v) * x) }
 		_, err = s.CompleteMetricJobs(ctx, jobs, at, store.MetricValues{Views: sc(r.views), Likes: sc(r.likes), Replies: sc(r.replies), Reposts: sc(r.reposts), Followers: &f})
 		must(err)

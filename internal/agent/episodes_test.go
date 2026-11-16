@@ -28,7 +28,7 @@ func seedEpisode(t *testing.T, st *store.Store, agentID, kind, text string, post
 	if _, err = db.Exec(`INSERT INTO metrics(agent_id,action_id,measured_at,views,likes,replies) VALUES(?,?,?,?,?,?)`, agentID, id, measured, views, likes, replies); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES(?,?,?,?,?,?)`, agentID, id, window, measured, measured, measured); err != nil {
+	if _, err = db.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES(?,?,?,?,?,?)`, agentID, id, window*60, measured, measured, measured); err != nil {
 		t.Fatal(err)
 	}
 	return id

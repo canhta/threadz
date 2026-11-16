@@ -212,7 +212,8 @@ func TestSchedulerDefersAnAgentWakeDueInQuietHours(t *testing.T) {
 	g := newInboxRigWith(t, 0, func(tmpl *config.Template) {
 		tmpl.Schedule = config.ScheduleConfig{Timezone: "UTC", QuietFrom: "11:00", QuietUntil: "13:30"}
 	})
-	if err := g.st.SetNextWake(context.Background(), "synthetic-offline", g.now.Add(-time.Minute)); err != nil {
+	// Due before the rig's first metric target (15 minutes after the post an hour ago).
+	if err := g.st.SetNextWake(context.Background(), "synthetic-offline", g.now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := (agent.Scheduler{Agents: []*agent.Runtime{g.r}, Now: func() time.Time { return g.now }}).Run(context.Background(), true); err != nil {

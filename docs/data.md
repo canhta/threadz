@@ -15,7 +15,7 @@ The whole schema is [`internal/store/schema.sql`](../internal/store/schema.sql);
 | `lessons` | One sentence of at most 240 characters on how to write, with `kind`, `polarity`, evidence (cited action ids), `confirmed_at`, and a retirement (`retired_at`, `retired_by` of `dream`, `owner` or `expiry`, reason) ([learning.md](learning.md#lessons)) | Dream, owner `/forget` |
 | `action_lessons` | The lessons an action said it applied (`lesson_ids`) | Dispatcher |
 | `action_parts` | Later parts (2 to 5) of a series: text, `thread_url`, `media_id`. A part with an empty `thread_url` was never published | Dispatcher |
-| `metric_jobs` | Durable +1h/+6h/+24h targets: lease, fence, attempts, `completed_at`, `reason` | Metrics |
+| `metric_jobs` | Durable targets at 15 min, 1 h, 3 h, 6 h, 12 h, 24 h, 48 h, 96 h and 168 h after publication (`window_minutes`): lease, fence, attempts, `completed_at`, `reason` (`settled` for a target ended by a flat action) | Metrics |
 | `metrics` | Repeated measurements per action (views, likes, replies, reposts, quotes, shares, followers, `author_replied`; the last four nullable) | Metrics |
 | `account_followers` | Latest own follower count per agent, read from the own profile page at the start of each agent wake, and its `source` (`followers_browser` or `followers_api_fallback`); a metrics batch stamps its samples with this row | `read_own_metrics` |
 | `account_samples` | One row per account insights read of a window total (`metric`, `since`, `until`, `value`, `source`); append only, skipped when equal to the previous row of the same metric and window ([threads.md](threads.md#account-insights)) | Metrics |

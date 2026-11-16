@@ -3,6 +3,7 @@ package threads
 import (
 	"context"
 	"path"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,6 +21,7 @@ const (
 	OpReadReplies         = "read_replies"
 	OpQuota               = "publishing_limit"
 	OpReadOwnMetrics      = "read_own_metrics"
+	OpReadActionMetrics   = "read_action_metrics"
 	OpReadAccountInsights = "read_account_insights"
 	OpPost                = "post"
 	OpReply               = "reply"
@@ -47,6 +49,9 @@ type Memory struct {
 	// Quota answers publishing_limit.
 	Quota   Quota
 	Actions map[string]Metrics
+	// ActionErrors fails the batch entry of a media id; an id it does not hold
+	// is read from Actions.
+	ActionErrors map[string]error
 	// Profiles answers profile_lookup by username; a username it does not hold
 	// is a plain profile with no follower count.
 	Profiles map[string]Profile
@@ -192,15 +197,23 @@ func (m *Memory) ReadAccountInsights(ctx context.Context, since, until time.Time
 	out.Since, out.Until = since, until
 	return out, nil
 }
-func (m *Memory) ReadActionMetrics(ctx context.Context, id string) (Metrics, error) {
-	if err := m.serve(ctx, Call{Op: OpReadOwnMetrics, Arg: id}); err != nil {
-		return Metrics{}, err
+func (m *Memory) ReadActionMetricsBatch(ctx context.Context, ids []string) map[string]ActionMetricsResult {
+	out := make(map[string]ActionMetricsResult, len(ids))
+	err := m.serve(ctx, Call{Op: OpReadActionMetrics, Arg: strings.Join(ids, ",")})
+	for _, id := range ids {
+		v, ok := m.Actions[id]
+		switch {
+		case err != nil:
+			out[id] = ActionMetricsResult{Err: err}
+		case m.ActionErrors[id] != nil:
+			out[id] = ActionMetricsResult{Err: m.ActionErrors[id]}
+		case !ok:
+			out[id] = ActionMetricsResult{Err: ErrMetricsUnavailable}
+		default:
+			out[id] = ActionMetricsResult{Metrics: v}
+		}
 	}
-	v, ok := m.Actions[id]
-	if !ok {
-		return Metrics{}, ErrMetricsUnavailable
-	}
-	return v, nil
+	return out
 }
 func (m *Memory) Post(ctx context.Context, text, topic string) (Published, error) {
 	if err := m.serve(ctx, Call{Op: OpPost, Arg: topic, Text: text}); err != nil {

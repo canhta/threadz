@@ -25,6 +25,9 @@ func TestGuardedActionMetricsBindOwnedConfirmedAction(t *testing.T) {
 			h := newBrowserHarness(t, true)
 			h.backend.Actions[mediaOf(tc.url)] = threads.Metrics{Views: 5, Likes: 1}
 			h.backend.Hook = func(ctx context.Context, c threads.Call) error {
+				if c.Op != threads.OpReadActionMetrics {
+					return nil
+				}
 				url := c.Arg
 				calls++
 				if _, ok := ctx.Deadline(); !ok {
@@ -43,12 +46,12 @@ func TestGuardedActionMetricsBindOwnedConfirmedAction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, err := h.call("read_own_metrics", `{"action_id":11}`)
+			out, err := h.call("read_own_metrics", `{"action_ids":[11]}`)
 			if tc.allowed {
 				if err != nil || !strings.Contains(out, `"action_id":11`) || !strings.Contains(out, `"views":5`) {
 					t.Fatalf("%s %v", out, err)
 				}
-			} else if err == nil || calls != 0 {
+			} else if err != nil || calls != 0 || !strings.Contains(out, `"failure":"metrics_unavailable"`) {
 				t.Fatalf("invalid binding called source: %s %v calls=%d", out, err, calls)
 			}
 		})
@@ -59,13 +62,13 @@ func TestActionMetricsNeverFallsBackToAggregate(t *testing.T) {
 	if _, err := h.store.DB().Exec(`INSERT INTO actions(id,agent_id,kind,text,dry_run,posted_at,thread_url) VALUES(1,'agent','post','',0,'2026-11-11T00:00:00Z','https://threads.example/own')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.call("read_own_metrics", `{"action_id":1}`); err == nil {
-		t.Fatal("missing optional source accepted")
+	if out, err := h.call("read_own_metrics", `{"action_ids":[1]}`); err != nil || !strings.Contains(out, `"failure":"metrics_unavailable"`) {
+		t.Fatalf("an action without a media id was measured: %s %v", out, err)
 	}
 	if aggregateReads(h.backend) != 0 {
 		t.Fatal("aggregate fallback")
 	}
-	for i, args := range []string{`{"action_id":0}`, `{"action_id":-1}`, `{"action_id":1.1}`, `{"action_id":null}`, `{"action_id":"1"}`, `{"action_id":9223372036854775808}`} {
+	for i, args := range []string{`{"action_ids":[0]}`, `{"action_ids":[-1]}`, `{"action_ids":[1.1]}`, `{"action_ids":["1"]}`, `{"action_ids":[9223372036854775808]}`, `{"action_id":1}`} {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			if _, err := h.call("read_own_metrics", args); err == nil {
 				t.Fatal("invalid id accepted")

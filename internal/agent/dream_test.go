@@ -198,7 +198,7 @@ func TestDreamGateCountsDistinctRankedActionsOnce(t *testing.T) {
 		if _, err := g.st.DB().Exec(`INSERT INTO metrics(agent_id,action_id,measured_at,views,likes,replies) VALUES(?,?,?,100,3,0)`, g.tmpl, id, at); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := g.st.DB().Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES(?,?,24,?,?,?)`, g.tmpl, id, at, at, at); err != nil {
+		if _, err := g.st.DB().Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES(?,?,1440,?,?,?)`, g.tmpl, id, at, at, at); err != nil {
 			t.Fatal(err)
 		}
 	}

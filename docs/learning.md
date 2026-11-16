@@ -6,11 +6,14 @@ Code measures outcomes and ranks them; the agent never counts its own results. M
 
 | Rule | Fact |
 |---|---|
-| Seeding | Each own confirmed publication seeds durable targets at `posted_at` + 1 h, + 6 h, + 24 h. Dry-run and unconfirmed or unknown intents seed none; only actions of the last 29 days are seeded |
+| Seeding | Each own confirmed publication seeds durable targets at `posted_at` + 15 min, 1 h, 3 h, 6 h, 12 h, 24 h, 48 h, 96 h and 168 h (`store.MetricWindowMinutes`, the list `metric_jobs.window_minutes` is constrained to). Dry-run and unconfirmed or unknown intents seed none; only actions of the last 29 days are seeded |
 | Scheduling | Independent of the agent's chosen wake, serialized with agent sessions, owner state rechecked. Audit scope `wakes.kind='metrics'` ([wake.md](wake.md)) |
 | Followers | A sample's `followers` is the newest `account_followers` row, which each agent wake records from the own profile page ([threads.md](threads.md)); a batch makes no account read and opens no browser for it. No row yet leaves it absent |
 | Coalescing | Targets are approximate. Late or restarted work coalesces all ready windows of an action into one read and one sample at the actual time; each completed target references that sample time. Completed targets are never re-read |
-| Claims | Default 10 action groups per batch, five-minute lease, five-minute retry. Atomic claims exclude active leases; expiry increments a fencing version. Only the complete fresh claim set can insert the sample and complete its targets. A failed transaction keeps no partial sample |
+| Batching | The actions claimed for one run are read with one guarded `read_own_metrics` call carrying all their ids; the API client splits it into `ids=` calls of 25 ([threads.md](threads.md#metrics-reads)). An action that fails (unavailable, deleted, unreadable) is deferred alone; the others are sampled |
+| Settling | A sample at the 24 h window or later that differs from the one before it by less than 2% of its views, and by nothing in likes and replies, ends the action's remaining targets with reason `settled` and no read. A growing action keeps its schedule. Settled targets are not episodes |
+| Refresh | `Processor.Refresh` samples own actions younger than 24 h now, apart from the jobs, at most once per 60 seconds per action; a refreshed action that is also due is read once. The sample leaves every job as it is |
+| Claims | Default 100 action groups per batch, five-minute lease, five-minute retry. Atomic claims exclude active leases; expiry increments a fencing version. Only the complete fresh claim set can insert the sample and complete its targets. A failed transaction keeps no partial sample |
 | Deferral | Unavailable reads defer with a fixed reason and no sample. The delay doubles with each deferral that counts (not `cancelled`, `auth_required`, `source_unavailable`); the eighth ends the job with its reason |
 | Deleted post | A read failing with `400 code 100` while the account's thread listing no longer holds the post ends every open job with `media_gone`; the dashboard marks it Deleted |
 | Failure | Authentication stops pause the agent and queue the owner notice. Cancellation, audit and persistence failures surface as errors; remaining claims defer or recover after expiry. Each maintenance backend closes on every exit |
@@ -23,7 +26,7 @@ An episode is one live, confirmed own action with what is known about it. It is 
 | Part | Fact |
 |---|---|
 | Content | Kind, text, hook, `angle`, `fact`, `topic_tag`, `posted_at`, and for a reply the target's figures at read time (replies, age, likes) |
-| Window | The newest completed metric target: 1, 6 or 24 hours. Rank uses the target window, never the time since posting, so a 6 h score is never compared with a late 9 h one |
+| Window | The newest completed metric target among 1, 6 and 24 hours (`store.CohortWindowMinutes`); the other offsets are not compared across actions. Rank uses the target window, never the time since posting, so a 6 h score is never compared with a late 9 h one |
 | Score | `likes + 2 * replies` at the window |
 | Rank | Percentile of the score among the agent's last 50 live actions of the same kind and window; ties go by views |
 | Band | `top` at rank 0.75 or more, `bottom` at 0.25 or less, else `mid`. With fewer than 8 comparable actions the band is `unranked` and the numbers still show |

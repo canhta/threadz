@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -344,35 +345,94 @@ func (i insights) metrics() (Metrics, error) {
 	return m, nil
 }
 
-// ReadActionMetrics returns the per-post insights of the own post with media
-// id. A response without views, likes, replies or reposts is unavailable.
-func (a *API) ReadActionMetrics(ctx context.Context, id string) (Metrics, error) {
-	var in insights
-	if err := a.do(ctx, http.MethodGet, "/"+url.PathEscape(id)+"/insights", url.Values{"metric": {postMetrics}}, &in); err != nil {
-		if errors.Is(err, ErrAPI) && strings.Contains(err.Error(), "status 400 code 100") {
-			return Metrics{}, ErrMediaNotFound
-		}
-		return Metrics{}, err
+// InsightsBatchIDs is how many media ids one `ids=` insights call reads.
+const InsightsBatchIDs = 25
+
+// ActionMetricsResult is what a batch read gave for one media id.
+type ActionMetricsResult struct {
+	Metrics Metrics
+	Err     error
+}
+
+// ReadActionMetricsBatch returns the per-post insights of the own posts with the
+// given media ids, InsightsBatchIDs per call. Every id has an entry: a response
+// without views, likes, replies or reposts for it is unavailable. When the API
+// rejects a whole batch as invalid (one deleted post does that), its ids are
+// read one by one so the others still succeed.
+func (a *API) ReadActionMetricsBatch(ctx context.Context, ids []string) map[string]ActionMetricsResult {
+	out := make(map[string]ActionMetricsResult, len(ids))
+	for chunk := range slices.Chunk(ids, InsightsBatchIDs) {
+		a.readInsightsChunk(ctx, chunk, out)
 	}
-	for _, name := range []string{"views", "likes", "replies", "reposts"} {
-		if !in.has(name) {
-			return Metrics{}, ErrMetricsUnavailable
-		}
+	return out
+}
+
+func (a *API) readInsightsChunk(ctx context.Context, ids []string, out map[string]ActionMetricsResult) {
+	var body map[string]struct {
+		insights
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
 	}
-	m, err := in.metrics()
+	err := a.do(ctx, http.MethodGet, "/insights", url.Values{"ids": {strings.Join(ids, ",")}, "metric": {postMetrics}}, &body)
 	if err != nil {
-		return m, err
+		invalid := errors.Is(err, ErrAPI) && strings.Contains(err.Error(), "status 400 code 100")
+		switch {
+		case invalid && len(ids) > 1:
+			for _, id := range ids {
+				a.readInsightsChunk(ctx, []string{id}, out)
+			}
+		case invalid:
+			out[ids[0]] = ActionMetricsResult{Err: ErrMediaNotFound}
+		default:
+			for _, id := range ids {
+				out[id] = ActionMetricsResult{Err: err}
+			}
+		}
+		return
 	}
-	// Insights reports replies 0 for an own reply comment, so count its direct
-	// replies. A failed lookup keeps the insights value.
-	var self apiPost
-	if a.do(ctx, http.MethodGet, "/"+url.PathEscape(id), url.Values{"fields": {"is_reply"}}, &self) == nil && self.IsReply {
+	var replies []string
+	for _, id := range ids {
+		entry, ok := body[id]
+		switch {
+		case ok && entry.Error != nil && entry.Error.Code == 100:
+			out[id] = ActionMetricsResult{Err: ErrMediaNotFound}
+			continue
+		case !ok || entry.Error != nil || !entry.has("views") || !entry.has("likes") || !entry.has("replies") || !entry.has("reposts"):
+			out[id] = ActionMetricsResult{Err: ErrMetricsUnavailable}
+			continue
+		}
+		m, err := entry.metrics()
+		out[id] = ActionMetricsResult{Metrics: m, Err: err}
+		if err == nil {
+			replies = append(replies, id)
+		}
+	}
+	a.countOwnReplyComments(ctx, replies, out)
+}
+
+// countOwnReplyComments fixes the replies of own reply comments: insights
+// reports 0 for them, so their direct replies are counted instead. A failed
+// lookup keeps the insights value.
+func (a *API) countOwnReplyComments(ctx context.Context, ids []string, out map[string]ActionMetricsResult) {
+	if len(ids) == 0 {
+		return
+	}
+	var self map[string]apiPost
+	if a.do(ctx, http.MethodGet, "/", url.Values{"ids": {strings.Join(ids, ",")}, "fields": {"is_reply"}}, &self) != nil {
+		return
+	}
+	for _, id := range ids {
+		if !self[id].IsReply {
+			continue
+		}
 		// Capped at one page of replyCountCap: a comment with more direct replies counts as that many.
 		if page, err := a.list(ctx, "replies", "/"+url.PathEscape(id)+"/replies", url.Values{"fields": {"id"}, "limit": {strconv.Itoa(replyCountCap)}}); err == nil {
-			m.Replies = max(m.Replies, int64(len(page.Posts)))
+			r := out[id]
+			r.Metrics.Replies = max(r.Metrics.Replies, int64(len(page.Posts)))
+			out[id] = r
 		}
 	}
-	return m, nil
 }
 
 // replyCountCap bounds the direct replies counted for an own reply comment.

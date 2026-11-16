@@ -23,20 +23,20 @@ import (
 	"github.com/canhta/threadz/internal/trends"
 )
 
-// actionReads returns the thread URLs of per-action metric reads; every other
-// read_own_metrics call is an aggregate read.
+// actionReads returns the media ids of each batched per-action metric read,
+// comma separated; the account read is counted by aggregateReads.
 func actionReads(m *threads.Memory) []string {
-	urls := []string{}
+	ids := []string{}
 	for _, c := range m.Calls() {
-		if c.Op == threads.OpReadOwnMetrics && c.Arg != "" {
-			urls = append(urls, c.Arg)
+		if c.Op == threads.OpReadActionMetrics {
+			ids = append(ids, c.Arg)
 		}
 	}
-	return urls
+	return ids
 }
 
 func aggregateReads(m *threads.Memory) int {
-	return m.Count(threads.OpReadOwnMetrics) - len(actionReads(m))
+	return m.Count(threads.OpReadOwnMetrics)
 }
 
 // onOp runs f before every call of op.

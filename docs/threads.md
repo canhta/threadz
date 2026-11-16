@@ -18,7 +18,7 @@ Every own-account Threads operation uses the official Threads API, except two: t
 | `profile` | API | `GET /profile_lookup?username=` | `follower_count` and 7-day `views_count`; a missing field stays absent, a refused lookup is an ordinary tool error |
 | `read_own_metrics` (account) | API and browser | `GET /{user}/threads_insights?metric=followers_count` and the own profile page `/@{threads.username}`; the account totals this read also returns are not stored (the stored account series is `read_account_insights`) | The API `followers_count` lags or reads 0 on a live account, so the page count ("1 follower", "1.2K followers", "N người theo dõi") is the source of truth. The API value is the fallback when `threads.username` is unset or the page shows no count; the log names the source as `followers_browser` or `followers_api_fallback` |
 | `read_account_insights` | API | `GET /{user}/threads_insights?metric=views,likes,replies,reposts,quotes,clicks&since=&until=` in one request | Harness read of the last `days` closed Pacific days; the poll, backfill and storage are in the Account insights section below |
-| `read_own_metrics` with `action_id`, and metric jobs | API | `GET /{post}/insights` (views, likes, replies, reposts, quotes, shares) | By the media id stored at publish; none or no views, likes, replies and reposts = unavailable, not zero |
+| `read_own_metrics` with `action_ids`, and metric jobs | API | `GET /insights?ids=&metric=views,likes,replies,reposts,quotes,shares`, 25 media ids per call, then `GET /?ids=&fields=is_reply` for the posts that read | By the media ids stored at publish; none or no views, likes, replies and reposts = unavailable, not zero. A call the API rejects with `400 code 100` (one deleted post does that) is repeated one id at a time, so the other posts still read |
 | `find_posts` source `feed` | Browser | Pinned `agent-browser` profile | Each post has a permalink and no id |
 | `find_posts` source `topic` | Browser | Same session as `feed`: opens the topic URL of a Trending-now `t` ref (`/search?q=&serp_type=trends&trend_fbid=`) or, for `query`, `/search?q=&serp_type=default` | Posts like `feed`, at most 20; a feed-post reply path |
 | Own-thread listing | API | `GET /{user}/threads` | Reconciles unpublished intents; a deleted post is told by `400 code 100` plus a listing without it |
@@ -48,7 +48,7 @@ Measured on the live account on 2026-11-16 with read-only GETs against `graph.th
 | `clicks` | `link_total_values[]` of `{value, link_url}` and no `total_value` |
 | Several metrics | One request with `metric=views,likes,replies,reposts,quotes,clicks` returns all of them |
 | Usage | Every response carries `x-business-use-case-usage` (`{"<id>":[{"type":"threads","call_count":1,"total_cputime":1,"total_time":1,"estimated_time_to_regain_access":0}]}`) and no `x-app-usage` |
-| Post insights, several posts | `GET /insights?ids=a,b,c&metric=views` returns `{"a":{"data":[...]},...}` (3 ids tested; the maximum is not measured); `GET /{id}?fields=id,insights.metric(views,likes)` and `GET /?ids=a,b&fields=id` work; `POST /` with `batch=[...]` returns `400` with an empty body |
+| Post insights, several posts | `GET /insights?ids=a,b,c&metric=views` returns `{"a":{"data":[...]},...}` (3 ids tested; the API's maximum is not measured; the batch size used is 25 ids per call, `threads.InsightsBatchIDs`, and a longer list is split into calls of that size); `GET /{id}?fields=id,insights.metric(views,likes)` and `GET /?ids=a,b&fields=id` work; `POST /` with `batch=[...]` returns `400` with an empty body |
 | Post insights shape | `/{id}/insights?metric=views,likes,replies,reposts,quotes,shares` returns period `lifetime`, one value each; the replies metric is named `replies` |
 
 What the agent stores from these reads:
@@ -146,8 +146,8 @@ The browser session is logged in by cookies the owner sends; the harness never t
 
 ## Metrics reads
 
-`read_own_metrics` with `action_id` resolves the stored media id and returns that local action ID
-with bounded nonnegative counters. It never attributes account aggregates to an action. `quotes`,
+`read_own_metrics` with `action_ids` resolves the stored media ids, reads them in batched calls and returns one entry per local action ID
+with bounded nonnegative counters, or a `failure` reason code (`metrics_unavailable`, `media_not_found`, `read_failed`) and no counters. One failed post does not fail the others. It never attributes account aggregates to an action. `quotes`,
 `shares` and `followers_count` are nullable and stay absent when missing.
 
 For a reply it also returns `author_replied`: whether the replied-to post's author is among the
@@ -157,3 +157,5 @@ absent.
 
 Each metric sample stores views, likes, replies, reposts, quotes, shares, `author_replied`, and the
 account follower count, which is read once per batch of claimed targets.
+
+A post is measured at 15 minutes, 1, 3, 6, 12, 24, 48, 96 and 168 hours after it was published ([learning.md](learning.md#metric-jobs)).

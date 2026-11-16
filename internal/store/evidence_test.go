@@ -165,7 +165,7 @@ func seedMeasuredPost(st *Store, at time.Time) error {
 	}
 	for _, h := range []int{1, 6, 24} {
 		due := at.Add(time.Duration(h) * time.Hour).Format(time.RFC3339Nano)
-		if _, err = tx.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES('a',?,?,?,?,?)`, id, h, due, due, measured); err != nil {
+		if _, err = tx.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES('a',?,?,?,?,?)`, id, h*60, due, due, measured); err != nil {
 			return err
 		}
 	}

@@ -50,7 +50,7 @@ func newDreamFixture(t *testing.T, phase string) *dreamFixture {
 		}{
 			{`INSERT INTO actions(agent_id,kind,text,dry_run,posted_at,thread_url,media_id) VALUES('agent','post','p',0,?,?,?)`, []any{posted.Format(time.RFC3339Nano), fmt.Sprintf("https://threads.test/@a/post/%d", i), fmt.Sprintf("m%d", i)}},
 			{`INSERT INTO metrics(agent_id,action_id,measured_at,views,likes,replies) VALUES('agent',?,?,?,?,0)`, []any{i + 1, measured, likes, likes}},
-			{`INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES('agent',?,6,?,?,?)`, []any{i + 1, measured, measured, measured}},
+			{`INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES('agent',?,360,?,?,?)`, []any{i + 1, measured, measured, measured}},
 		} {
 			if _, err = st.DB().Exec(q.sql, q.args...); err != nil {
 				t.Fatal(err)

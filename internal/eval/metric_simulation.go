@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/canhta/threadz/internal/config"
@@ -97,6 +98,7 @@ func RunMetricSimulation(ctx context.Context, path string, hours int, logger *sl
 	if err = create(); err != nil {
 		return e, err
 	}
+	postedBy := map[string][]time.Time{}
 	insert := func(agentID string, posted time.Time, dry, confirmed bool) error {
 		url := ""
 		if confirmed {
@@ -107,11 +109,12 @@ func RunMetricSimulation(ctx context.Context, path string, hours int, logger *sl
 		}
 		if !dry && confirmed {
 			source.Actions[mediaOf(url)] = threads.Metrics{Views: 123, Likes: 7, Replies: 3, Reposts: 1}
+			postedBy[agentID] = append(postedBy[agentID], posted)
 			e.ConfirmedActions++
 		}
 		return nil
 	}
-	// Three already-overdue windows must coalesce into one current sample.
+	// The overdue windows of an old action must coalesce into one current sample.
 	if err = insert(templates[0].ID, start.Add(-26*time.Hour), false, true); err != nil {
 		return e, err
 	}
@@ -152,7 +155,7 @@ func RunMetricSimulation(ctx context.Context, path string, hours int, logger *sl
 			if err != nil {
 				return e, err
 			}
-			call := llm.ToolCall{ID: "synthetic-crash-read", Type: "function", Function: llm.CallFunction{Name: "read_own_metrics", Arguments: fmt.Sprintf(`{"action_id":%d}`, jobs[0].ActionID)}}
+			call := llm.ToolCall{ID: "synthetic-crash-read", Type: "function", Function: llm.CallFunction{Name: "read_own_metrics", Arguments: fmt.Sprintf(`{"action_ids":[%d]}`, jobs[0].ActionID)}}
 			_, readErr := d.DispatchHarness(ctx, call)
 			closeErr := source.Close(ctx)
 			if readErr != nil || closeErr != nil {
@@ -194,16 +197,20 @@ func RunMetricSimulation(ctx context.Context, path string, hours int, logger *sl
 			}
 		}
 	}
-	expectedTargets := 3
-	for posted := 0; posted < hours; posted += 24 {
-		for _, window := range store.MetricWindows {
-			if posted+window <= hours {
-				expectedTargets += 2
+	expectedTargets, expectedReads := 0, 1 // one more read for the crash
+	for _, posted := range postedBy {
+		ticks := map[int]bool{}
+		for _, at := range posted {
+			samples, targets, claimed := expectedMetricRun(at, start, hours)
+			e.ExpectedSamples += samples
+			expectedTargets += targets
+			for _, h := range claimed {
+				ticks[h] = true
 			}
 		}
+		expectedReads += len(ticks)
 	}
-	e.ExpectedSamples = expectedTargets - 2
-	e.SourceReads = source.Count(threads.OpReadOwnMetrics)
+	e.SourceReads = source.Count(threads.OpReadActionMetrics)
 	tally, err := st.MetricTally(ctx, "")
 	if err != nil {
 		return e, err
@@ -221,7 +228,7 @@ func RunMetricSimulation(ctx context.Context, path string, hours int, logger *sl
 	if e.MaintenanceWakes, err = st.MetricsWakeCount(ctx); err != nil {
 		return e, err
 	}
-	if e.Samples != e.ExpectedSamples || tally.Samples != e.ExpectedSamples || e.CompletedTargets != expectedTargets || e.SourceReads != e.ExpectedSamples+1 || e.AuditReads != e.SourceReads {
+	if e.Samples != e.ExpectedSamples || tally.Samples != e.ExpectedSamples || e.CompletedTargets != expectedTargets || e.SourceReads != expectedReads || e.AuditReads != e.SourceReads {
 		return e, errors.New("metric simulation: sample, target or guarded read counts failed")
 	}
 	for _, tmpl := range templates {
@@ -238,6 +245,38 @@ func RunMetricSimulation(ctx context.Context, path string, hours int, logger *sl
 		e.Observations = append(e.Observations, MetricSimulationSample{AgentID: m.AgentID, MetricSample: m.MetricSample})
 	}
 	return e, nil
+}
+
+// expectedMetricRun is the schedule worked out independently of the store for
+// one action whose source never changes: it is read at the first hourly tick
+// after each offset falls due (the ticks of hours 24 and 25 are the crash gap
+// and read at 26), every offset due at one tick shares a sample, and a sample
+// at the settle window after an earlier one ends the action. It returns the
+// samples, the completed targets (settled ones included) and the ticks read.
+func expectedMetricRun(posted, start time.Time, hours int) (samples, targets int, claimed []int) {
+	byTick := map[int][]int{}
+	for _, m := range store.MetricWindowMinutes {
+		h := max(0, int((posted.Add(time.Duration(m)*time.Minute).Sub(start)+time.Hour-1)/time.Hour))
+		if h == 24 || h == 25 {
+			h = 26
+		}
+		if h <= hours {
+			byTick[h] = append(byTick[h], m)
+		}
+	}
+	for h := 0; h <= hours; h++ {
+		offsets, ok := byTick[h]
+		if !ok {
+			continue
+		}
+		samples++
+		targets += len(offsets)
+		claimed = append(claimed, h)
+		if samples > 1 && slices.ContainsFunc(offsets, func(m int) bool { return m >= 1440 }) {
+			return samples, len(store.MetricWindowMinutes), claimed
+		}
+	}
+	return samples, targets, claimed
 }
 
 func simulationTrends(context.Context) ([]trends.Trend, error) { return nil, nil }

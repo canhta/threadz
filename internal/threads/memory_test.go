@@ -30,11 +30,19 @@ func TestMemoryServesConfiguredPagesAndRecordsCalls(t *testing.T) {
 	if v, err := m.ReadOwnMetrics(ctx); err != nil || v.Views != 9 {
 		t.Fatalf("own=%+v err=%v", v, err)
 	}
-	if v, err := m.ReadActionMetrics(ctx, "own"); err != nil || v.Likes != 4 {
-		t.Fatalf("action=%+v err=%v", v, err)
+	batch := m.ReadActionMetricsBatch(ctx, []string{"own", "other"})
+	if batch["own"].Err != nil || batch["own"].Metrics.Likes != 4 {
+		t.Fatalf("action=%+v", batch["own"])
 	}
-	if _, err := m.ReadActionMetrics(ctx, "other"); !errors.Is(err, ErrMetricsUnavailable) {
-		t.Fatalf("unknown action url err=%v", err)
+	if !errors.Is(batch["other"].Err, ErrMetricsUnavailable) {
+		t.Fatalf("unknown action url err=%v", batch["other"].Err)
+	}
+	m.ActionErrors = map[string]error{"own": ErrMediaNotFound}
+	if r := m.ReadActionMetricsBatch(ctx, []string{"own"})["own"]; !errors.Is(r.Err, ErrMediaNotFound) {
+		t.Fatalf("injected action error = %v", r.Err)
+	}
+	if m.Count(OpReadActionMetrics) != 2 || m.Last(OpReadActionMetrics).Arg != "own" {
+		t.Fatalf("a batch is one served call: %+v", m.Calls())
 	}
 	if u, err := m.Post(ctx, "hello", ""); err != nil || u != (Published{URL: "https://t.test/new", ID: "new"}) {
 		t.Fatalf("post=%+v err=%v", u, err)
@@ -48,7 +56,7 @@ func TestMemoryServesConfiguredPagesAndRecordsCalls(t *testing.T) {
 	if got := m.Last(OpReply); got != (Call{Op: OpReply, Arg: "https://t.test/p", Text: "re"}) {
 		t.Fatalf("last reply=%+v", got)
 	}
-	if m.Count(OpReadOwnMetrics) != 3 || m.Count(OpClose) != 1 || len(m.Calls()) != 9 {
+	if m.Count(OpReadOwnMetrics) != 1 || m.Count(OpClose) != 1 || len(m.Calls()) != 9 {
 		t.Fatalf("calls=%+v", m.Calls())
 	}
 	if m.Last("missing") != (Call{}) {
@@ -60,7 +68,7 @@ func TestMemoryErrorsAndHookFailOperations(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("boom")
 	m := NewMemory()
-	for _, op := range []string{OpReadFeed, OpSearch, OpReadPost, OpReadOwnMetrics, OpPost, OpReply, OpClose} {
+	for _, op := range []string{OpReadFeed, OpSearch, OpReadPost, OpReadOwnMetrics, OpReadActionMetrics, OpPost, OpReply, OpClose} {
 		m.Errors[op] = boom
 	}
 	if _, err := m.ReadFeed(ctx); !errors.Is(err, boom) {
@@ -75,8 +83,8 @@ func TestMemoryErrorsAndHookFailOperations(t *testing.T) {
 	if _, err := m.ReadOwnMetrics(ctx); !errors.Is(err, boom) {
 		t.Fatal(err)
 	}
-	if _, err := m.ReadActionMetrics(ctx, ""); !errors.Is(err, boom) {
-		t.Fatal(err)
+	if r := m.ReadActionMetricsBatch(ctx, []string{""})[""]; !errors.Is(r.Err, boom) {
+		t.Fatal(r.Err)
 	}
 	if _, err := m.Post(ctx, "", ""); !errors.Is(err, boom) {
 		t.Fatal(err)

@@ -1,14 +1,16 @@
--- Schema v13 -> v14. One-off; run against a STOPPED service, after backing up
--- the database:  sqlite3 -bail threadz.db < migrate-14.sql
+-- Schema v13 -> v15. One-off; run against a STOPPED service, after backing up
+-- the database:  sqlite3 -bail threadz.db < migrate-15.sql
 -- -bail is required: it stops the script at the first error. The file refuses
 -- to run on any other schema version and is one transaction: it applies
 -- completely or not at all. It adds the account insights tables and the
--- account_reconciliation view and adds account_followers.source; no row changes.
--- The first run of the new binary backfills account_daily from the API.
+-- account_reconciliation view, adds account_followers.source, and rebuilds
+-- metric_jobs with window_minutes (the old window_hours times 60), the new
+-- offset list and the settled reason; every job and sample is kept. The first run of
+-- the new binary backfills account_daily from the API and seeds the new offsets.
 --
--- The store test (TestMigrate14MatchesFreshSchema) builds v13 from
+-- The store test (TestMigrate15MatchesFreshSchema) builds v13 from
 -- internal/store/testdata/schema-v13.sql, applies this file and compares the
--- result with a fresh v14 database; keep the two in step.
+-- result with a fresh v15 database; keep the two in step.
 
 BEGIN IMMEDIATE;
 
@@ -55,8 +57,35 @@ FROM (
     WHERE d.metric = 'views'
 );
 
--- Append further v14 changes above this line.
+ALTER TABLE metric_jobs RENAME TO metric_jobs_v13;
 
-PRAGMA user_version = 14;
+CREATE TABLE metric_jobs (
+    agent_id TEXT NOT NULL,
+    action_id INTEGER NOT NULL,
+    window_minutes INTEGER NOT NULL CHECK(window_minutes IN (15,60,180,360,720,1440,2880,5760,10080)),
+    due_at TEXT NOT NULL,
+    not_before TEXT NOT NULL,
+    claim_version INTEGER NOT NULL DEFAULT 0 CHECK(claim_version >= 0),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+    claimed_at TEXT,
+    lease_until TEXT,
+    completed_at TEXT,
+    reason TEXT NOT NULL DEFAULT '' CHECK(reason IN ('','metrics_unavailable','source_unavailable','read_failed','binding_mismatch','auth_required','cancelled','persistence_failed','measurement_failed','media_gone','settled')),
+    PRIMARY KEY(agent_id,action_id,window_minutes),
+    CHECK((claimed_at IS NULL) = (lease_until IS NULL)),
+    CHECK(lease_until IS NULL OR lease_until > claimed_at),
+    CHECK(completed_at IS NULL OR lease_until IS NULL)
+);
+
+INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,claim_version,attempts,claimed_at,lease_until,completed_at,reason)
+SELECT agent_id,action_id,window_hours*60,due_at,not_before,claim_version,attempts,claimed_at,lease_until,completed_at,reason FROM metric_jobs_v13;
+
+DROP TABLE metric_jobs_v13;
+
+CREATE INDEX metric_jobs_pending ON metric_jobs(agent_id,completed_at,not_before,due_at);
+
+-- Append further v15 changes above this line.
+
+PRAGMA user_version = 15;
 
 COMMIT;

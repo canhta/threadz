@@ -161,13 +161,13 @@ Sections run in this order; missing values show `—`.
 
 ## Manual deploy of a schema change
 
-A release that changes the schema (here v13 to v14) carries a `Manual step:` line in its release notes and `threadz update` refuses it. Install by hand, in this order:
+A release that changes the schema (here v13 to v15) carries a `Manual step:` line in its release notes and `threadz update` refuses it. Install by hand, in this order:
 
 1. Stop both services: `systemctl stop threadz threadz-dashboard`. The dashboard runs the same binary on the same database.
 2. Back up the database: `cp /opt/threadz/data/threadz.db /opt/threadz/data/threadz.db.v13`.
-3. Migrate the database (one transaction, refuses any schema other than v13; it adds the `account_samples` and `account_daily` tables, the `account_reconciliation` view and `account_followers.source`, and changes no row): `sqlite3 -bail /opt/threadz/data/threadz.db < deploy/migrate-14.sql`
+3. Migrate the database (one transaction, refuses any schema other than v13; it adds the `account_samples` and `account_daily` tables, the `account_reconciliation` view and `account_followers.source`, and rebuilds `metric_jobs` with `window_minutes`, the new offsets and the `settled` reason, keeping every job and sample): `sqlite3 -bail /opt/threadz/data/threadz.db < deploy/migrate-15.sql`
 4. Install the new binary over `/opt/threadz/threadz`.
 5. Check with the service env: `set -a; . /etc/threadz/threadz.env; set +a; /opt/threadz/threadz check --agents /opt/threadz/agents --db /opt/threadz/data/threadz.db`
 6. Start the services: `systemctl start threadz`, then `systemctl start threadz-dashboard`, then `threadz ctl doctor`.
 
-To roll back, stop both services, restore the database backup over the migrated one (the previous binary refuses a v14 database): `cp /opt/threadz/data/threadz.db.v13 /opt/threadz/data/threadz.db`, install the previous binary and start the services as in step 6.
+To roll back, stop both services, restore the database backup over the migrated one (the previous binary refuses a v15 database): `cp /opt/threadz/data/threadz.db.v13 /opt/threadz/data/threadz.db`, install the previous binary and start the services as in step 6.

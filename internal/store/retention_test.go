@@ -97,7 +97,7 @@ func TestPruneKeepsCompletedMetricJobsSoEpisodesSurvive(t *testing.T) {
 	measured := stamp(posted.Add(6 * time.Hour))
 	exec(t, s, `INSERT INTO actions(id,agent_id,kind,text,dry_run,posted_at,thread_url,media_id) VALUES(1,'a','post','old',0,?,'https://threads.test/p','m')`, stamp(posted))
 	exec(t, s, `INSERT INTO metrics(agent_id,action_id,measured_at,views,likes,replies) VALUES('a',1,?,10,3,0)`, measured)
-	exec(t, s, `INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES('a',1,6,?,?,?)`, measured, measured, measured)
+	exec(t, s, `INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES('a',1,360,?,?,?)`, measured, measured, measured)
 	prune(t, s)
 	eps, err := s.Episodes(context.Background(), "a", store.EpisodeQuery{})
 	if err != nil || len(eps) != 1 || eps[0].Window != 6 {
@@ -250,8 +250,8 @@ func TestSeedMetricJobsSkipsActionsBeyondTheJobRetention(t *testing.T) {
 	edge := retentionNow.Add(-29 * 24 * time.Hour)
 	exec(t, s, `INSERT INTO actions(agent_id,kind,text,posted_at,thread_url,dry_run,media_id) VALUES('a','post','',?,'https://example.test/x',0,'m')`, stamp(edge))
 	exec(t, s, `INSERT INTO actions(agent_id,kind,text,posted_at,thread_url,dry_run,media_id) VALUES('a','post','',?,'https://example.test/y',0,'m')`, stamp(edge.Add(-time.Second)))
-	if n, err := s.SeedMetricJobs(ctx, "a", retentionNow); err != nil || n != 3 {
-		t.Fatalf("seeded %d jobs, err %v, want 3 for the action inside the window", n, err)
+	if n, err := s.SeedMetricJobs(ctx, "a", retentionNow); err != nil || n != len(store.MetricWindowMinutes) {
+		t.Fatalf("seeded %d jobs, err %v, want one per offset for the action inside the window", n, err)
 	}
 	if n, err := s.SeedMetricJobs(ctx, "a", retentionNow.Add(time.Second)); err != nil || n != 0 {
 		t.Fatalf("seeded %d jobs past the window, err %v", n, err)

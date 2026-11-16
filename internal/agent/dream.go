@@ -57,9 +57,9 @@ Call lesson_add, lesson_confirm and lesson_retire as needed, then end with one s
 
 // windowList names the metric windows in hours: "1, 6 or 24".
 func windowList() string {
-	parts := make([]string, len(store.MetricWindows))
-	for i, h := range store.MetricWindows {
-		parts[i] = strconv.Itoa(h)
+	parts := make([]string, len(store.CohortWindowMinutes))
+	for i, m := range store.CohortWindowMinutes {
+		parts[i] = strconv.Itoa(m / 60)
 	}
 	return strings.Join(parts[:len(parts)-1], ", ") + " or " + parts[len(parts)-1]
 }

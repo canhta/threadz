@@ -43,9 +43,9 @@ func liveAPI(t *testing.T, mutate func(name, body string) string) (*fakeThreads,
 	api.o.UserID = fileID(t, CaptureMe)
 	post, reply := fileID(t, CaptureOwnPost), fileID(t, CaptureOwnReply)
 	f.route("GET", "/"+post, body(CaptureOwnPost))
-	f.route("GET", "/"+post+"/insights", body(CaptureOwnPostMetric))
 	f.route("GET", "/"+reply, body(CaptureOwnReply))
-	f.route("GET", "/"+reply+"/insights", body(CaptureOwnReplyMetric))
+	f.route("GET", "/insights", `{"`+post+`":`+body(CaptureOwnPostMetric)+`,"`+reply+`":`+body(CaptureOwnReplyMetric)+`}`)
+	f.route("GET", "/", `{"`+post+`":`+body(CaptureOwnPost)+`,"`+reply+`":`+body(CaptureOwnReply)+`}`)
 	f.route("GET", "/"+reply+"/replies", body(CaptureOwnReplyReplies))
 	f.route("GET", "/"+api.o.UserID+"/mentions", body(CaptureMentions))
 	return f, api, post, reply
@@ -72,9 +72,9 @@ func TestLiveContractDecodesThroughAPI(t *testing.T) {
 	}
 
 	// A post keeps the replies number its insights report and never reads /replies.
-	m, err := api.ReadActionMetrics(ctx, post)
-	if err != nil || m.Views == 0 || f.count("GET /"+post+"/replies") != 0 {
-		t.Fatalf("post metrics=%+v err=%v", m, err)
+	batch := api.ReadActionMetricsBatch(ctx, []string{post, reply})
+	if m := batch[post]; m.Err != nil || m.Metrics.Views == 0 || f.count("GET /"+post+"/replies") != 0 {
+		t.Fatalf("post metrics=%+v", m)
 	}
 	// Insights report replies=0 for an own reply; the /replies count replaces it.
 	var insightReplies int64 = -1
@@ -91,9 +91,8 @@ func TestLiveContractDecodesThroughAPI(t *testing.T) {
 	if err := json.Unmarshal([]byte(liveFile(t, CaptureOwnReplyReplies)), &direct); err != nil {
 		t.Fatal(err)
 	}
-	m, err = api.ReadActionMetrics(ctx, reply)
-	if insightReplies != 0 || err != nil || m.Replies != int64(len(direct.Data)) || m.Replies == 0 {
-		t.Fatalf("own reply: insights replies=%d, metrics=%+v err=%v", insightReplies, m, err)
+	if m := batch[reply]; insightReplies != 0 || m.Err != nil || m.Metrics.Replies != int64(len(direct.Data)) || m.Metrics.Replies == 0 {
+		t.Fatalf("own reply: insights replies=%d, metrics=%+v", insightReplies, m)
 	}
 }
 

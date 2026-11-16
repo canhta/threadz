@@ -40,7 +40,7 @@ func lessonsService(t *testing.T, texts ...string) (*telegram.Service, *store.St
 		if _, err = db.Exec(`INSERT INTO metrics(agent_id,action_id,measured_at,views,likes,replies) VALUES('one',?,?,?,?,0)`, id, measured, 100+i, i); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = db.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES('one',?,6,?,?,?)`, id, measured, measured, measured); err != nil {
+		if _, err = db.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES('one',?,360,?,?,?)`, id, measured, measured, measured); err != nil {
 			t.Fatal(err)
 		}
 	}

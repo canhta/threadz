@@ -36,17 +36,26 @@ func insertPipelineAction(t *testing.T, h *browserHarness, id int64, agent strin
 	}
 }
 
-func decodeActionMetrics(t *testing.T, out string) tools.ActionMetrics {
+func decodeActionMetricsBatch(t *testing.T, out string) []tools.ActionMetrics {
 	t.Helper()
 	envelope := decodeBrowserEnvelope(t, out)
 	if envelope.Source != "read_own_metrics" {
 		t.Fatalf("action metrics source = %q", envelope.Source)
 	}
-	var got tools.ActionMetrics
+	var got []tools.ActionMetrics
 	if err := json.Unmarshal(envelope.Data, &got); err != nil {
 		t.Fatalf("decoding action metrics %s: %v", envelope.Data, err)
 	}
 	return got
+}
+
+func decodeActionMetrics(t *testing.T, out string) tools.ActionMetrics {
+	t.Helper()
+	got := decodeActionMetricsBatch(t, out)
+	if len(got) != 1 {
+		t.Fatalf("action metrics = %+v, want one entry", got)
+	}
+	return got[0]
 }
 
 func TestReadOwnMetricsIsAHarnessReadTheModelCannotCall(t *testing.T) {
@@ -121,14 +130,14 @@ func TestActionScopedReadBindsOwnURLAndReturnsActionIdentity(t *testing.T) {
 	h := newBrowserHarness(t, true)
 	h.backend.Actions[mediaOf(threadURL)] = want
 	unbounded := false
-	onOp(h.backend, threads.OpReadOwnMetrics, func(ctx context.Context) {
+	onOp(h.backend, threads.OpReadActionMetrics, func(ctx context.Context) {
 		if _, ok := ctx.Deadline(); !ok {
 			unbounded = true
 		}
 	})
 	insertPipelineAction(t, h, actionID, agentID, false, threadURL)
 
-	out, err := h.call("read_own_metrics", fmt.Sprintf(`{"action_id":%d}`, actionID))
+	out, err := h.call("read_own_metrics", fmt.Sprintf(`{"action_ids":[%d]}`, actionID))
 	if err != nil {
 		t.Fatalf("action read: %v", err)
 	}
@@ -188,9 +197,12 @@ func TestActionScopedReadRefusesUnboundActionsBeforeReader(t *testing.T) {
 			if tc.name != "unknown" {
 				insertPipelineAction(t, h, tc.wantID, tc.agent, tc.dryRun, tc.binding)
 			}
-			out, err := h.call("read_own_metrics", fmt.Sprintf(`{"action_id":%d}`, tc.wantID))
-			if err == nil {
-				t.Fatalf("unbound action accepted: %s", out)
+			out, err := h.call("read_own_metrics", fmt.Sprintf(`{"action_ids":[%d]}`, tc.wantID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := decodeActionMetrics(t, out); got.ActionID != tc.wantID || got.Failure != tools.FailureUnavailable || got.Views != 0 {
+				t.Fatalf("unbound action = %+v, want an unavailable entry", got)
 			}
 			if calls := len(actionReads(h.backend)); calls != 0 {
 				t.Fatalf("reader called %d times for %s", calls, tc.name)
@@ -207,12 +219,14 @@ func TestActionScopedReadRefusesUnboundActionsBeforeReader(t *testing.T) {
 
 func TestActionScopedReadRejectsInvalidArgumentsBeforeReader(t *testing.T) {
 	for _, args := range []string{
-		`{"action_id":0}`,
-		`{"action_id":-1}`,
-		`{"action_id":1.5}`,
-		`{"action_id":"1"}`,
-		`{"action_id":9223372036854775808}`,
-		`{"action_id":true}`,
+		`{"action_ids":[0]}`,
+		`{"action_ids":[-1]}`,
+		`{"action_ids":[1.5]}`,
+		`{"action_ids":["1"]}`,
+		`{"action_ids":[9223372036854775808]}`,
+		`{"action_ids":true}`,
+		`{"action_ids":1}`,
+		`{"action_id":1}`,
 	} {
 		t.Run(strings.NewReplacer(`{`, "", `}`, "", `"`, "", `:`, "_").Replace(args), func(t *testing.T) {
 			h := newBrowserHarness(t, true)
@@ -220,7 +234,7 @@ func TestActionScopedReadRejectsInvalidArgumentsBeforeReader(t *testing.T) {
 			insertPipelineAction(t, h, 901, "agent", false, "https://threads.example/own")
 			out, err := h.call("read_own_metrics", args)
 			if err == nil {
-				t.Fatalf("invalid action_id accepted: %s", out)
+				t.Fatalf("invalid action_ids accepted: %s", out)
 			}
 			if len(actionReads(h.backend)) != 0 {
 				t.Fatal("invalid argument reached the optional reader")
@@ -231,26 +245,32 @@ func TestActionScopedReadRejectsInvalidArgumentsBeforeReader(t *testing.T) {
 
 func TestActionScopedReadRejectsUnsafeSourceResults(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		values threads.Metrics
-		err    error
+		name    string
+		values  threads.Metrics
+		err     error
+		failure string
 	}{
-		{name: "negative", values: threads.Metrics{Views: -1}},
-		{name: "reply_negative", values: threads.Metrics{Replies: -2}},
-		{name: "too_large", values: threads.Metrics{Views: 1<<53 + 1}},
-		{name: "source_error", err: errors.New("private transport detail")},
+		{name: "negative", values: threads.Metrics{Views: -1}, failure: tools.FailureUnavailable},
+		{name: "reply_negative", values: threads.Metrics{Replies: -2}, failure: tools.FailureUnavailable},
+		{name: "too_large", values: threads.Metrics{Views: 1<<53 + 1}, failure: tools.FailureUnavailable},
+		{name: "source_error", err: errors.New("private transport detail"), failure: tools.FailureRead},
+		{name: "not_found", err: threads.ErrMediaNotFound, failure: tools.FailureNotFound},
+		{name: "unavailable", err: threads.ErrMetricsUnavailable, failure: tools.FailureUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newBrowserHarness(t, true)
 			h.backend.Actions[mediaOf("https://threads.example/own")] = tc.values
-			h.backend.Errors[threads.OpReadOwnMetrics] = tc.err
+			h.backend.Errors[threads.OpReadActionMetrics] = tc.err
 			insertPipelineAction(t, h, 904, "agent", false, "https://threads.example/own")
-			out, err := h.call("read_own_metrics", `{"action_id":904}`)
-			if err == nil {
-				t.Fatalf("unsafe source result accepted: %s", out)
+			out, err := h.call("read_own_metrics", `{"action_ids":[904]}`)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if strings.Contains(err.Error(), "private transport detail") {
-				t.Fatalf("raw source error leaked: %v", err)
+			if got := decodeActionMetrics(t, out); got.Failure != tc.failure || got.Views != 0 || got.Replies != 0 {
+				t.Fatalf("unsafe source result = %+v, want failure %q and no counters", got, tc.failure)
+			}
+			if strings.Contains(out, "private transport detail") {
+				t.Fatalf("raw source error leaked: %s", out)
 			}
 			if aggregateReads(h.backend) != 0 {
 				t.Fatal("unsafe source result fell back to aggregate metrics")
@@ -278,7 +298,7 @@ func TestActionMetricsRecordWhetherTheTargetAuthorReplied(t *testing.T) {
 			h.backend.Pages[threads.OpReadReplies] = tc.page
 			h.backend.Errors[threads.OpReadReplies] = tc.err
 			insertPipelineAction(t, h, 950, "agent", false, threadURL)
-			out, err := h.call("read_own_metrics", `{"action_id":950}`)
+			out, err := h.call("read_own_metrics", `{"action_ids":[950]}`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -294,3 +314,43 @@ func TestActionMetricsRecordWhetherTheTargetAuthorReplied(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestActionMetricsBatchIsOneSourceCallWithPerActionOutcomes(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	const good, bad, ok = "https://threads.example/own/good", "https://threads.example/own/bad", "https://threads.example/own/ok"
+	for i, url := range []string{good, bad, ok} {
+		insertPipelineAction(t, h, int64(i+1), "agent", false, url)
+	}
+	h.backend.Actions[mediaOf(good)] = threads.Metrics{Views: 7, Likes: 2}
+	h.backend.Actions[mediaOf(ok)] = threads.Metrics{Views: 9}
+	h.backend.ActionErrors = map[string]error{mediaOf(bad): threads.ErrMediaNotFound}
+	out, err := h.call("read_own_metrics", `{"action_ids":[1,2,3,99]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeActionMetricsBatch(t, out)
+	if len(got) != 4 || got[0].Views != 7 || got[1].Failure != tools.FailureNotFound || got[2].Views != 9 || got[3].ActionID != 99 || got[3].Failure != tools.FailureUnavailable {
+		t.Fatalf("batch = %+v", got)
+	}
+	if reads := actionReads(h.backend); len(reads) != 1 || reads[0] != mediaOf(good)+","+mediaOf(bad)+","+mediaOf(ok) {
+		t.Fatalf("source calls = %v, want one batched call of the three bound media", reads)
+	}
+}
+
+func TestActionMetricsBatchLoggedOutFailsTheCall(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	insertPipelineAction(t, h, 1, "agent", false, "https://threads.example/own/one")
+	h.backend.Errors[threads.OpReadActionMetrics] = threads.ErrLoggedOut
+	if _, err := h.call("read_own_metrics", `{"action_ids":[1]}`); !errors.Is(err, threads.ErrLoggedOut) {
+		t.Fatalf("logged-out batch = %v, want ErrLoggedOut", err)
+	}
+}
+
+func TestActionMetricsBatchCancellationFailsTheCall(t *testing.T) {
+	h := newBrowserHarness(t, true)
+	insertPipelineAction(t, h, 1, "agent", false, "https://threads.example/own/one")
+	h.backend.Errors[threads.OpReadActionMetrics] = context.Canceled
+	if _, err := h.call("read_own_metrics", `{"action_ids":[1]}`); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled batch = %v, want context.Canceled", err)
+	}
+}

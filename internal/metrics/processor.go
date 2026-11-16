@@ -24,7 +24,12 @@ import (
 const (
 	DefaultLeaseDuration = 5 * time.Minute
 	DefaultRetryDelay    = 5 * time.Minute
-	DefaultBatchSize     = 10
+	DefaultBatchSize     = 100
+
+	// RefreshCooldown is the shortest time between two refreshes of one action.
+	RefreshCooldown = time.Minute
+	// refreshAge is how young an action is to be refreshed on request.
+	refreshAge = 24 * time.Hour
 
 	// AccountPollEvery is the period of the account insights read: the series
 	// only changes when a Pacific day closes, so a shorter period gains nothing.
@@ -58,6 +63,8 @@ type Result struct {
 	DeferredJobs int `json:"deferred_jobs"`
 	// AccountReads is 1 when this run stored an account insights read.
 	AccountReads int `json:"account_reads"`
+	// Refreshed counts the samples stored for refresh requests.
+	Refreshed int `json:"refreshed"`
 }
 type Processor struct {
 	mu   sync.Mutex
@@ -67,6 +74,10 @@ type Processor struct {
 	accountLast     time.Time
 	accountBackoff  time.Time
 	accountFailures int
+
+	refreshMu    sync.Mutex
+	refreshLast  map[int64]time.Time
+	refreshQueue []int64
 }
 
 func New(opts Options) (*Processor, error) {
@@ -134,7 +145,8 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	if err != nil {
 		return result, err
 	}
-	if !ok || due.After(p.opts.Now()) {
+	refresh := p.takeRefresh()
+	if len(refresh) == 0 && (!ok || due.After(p.opts.Now())) {
 		return result, nil
 	}
 	available, err := p.available(ctx)
@@ -156,7 +168,7 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	defer func() {
 		finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if runErr == nil && result.ClaimedJobs == 0 && !accountDue {
+		if runErr == nil && result.ClaimedJobs == 0 && !accountDue && len(refresh) == 0 {
 			// Nothing was due after all: leave no wake row behind.
 			runErr = metricError("dropping empty metric wake", p.opts.Store.DeleteMetricWake(finalCtx, wakeID))
 			return
@@ -181,7 +193,7 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	if due, enabled := p.accountDue(p.opts.Now()); enabled && !due.After(p.opts.Now()) {
 		accountDue = true
 	}
-	if len(jobs) == 0 && !accountDue {
+	if len(jobs) == 0 && !accountDue && len(refresh) == 0 {
 		return result, nil
 	}
 	groups := groupJobs(jobs)
@@ -252,31 +264,48 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 	} else if ok {
 		followers = &n
 	}
+	ids := make([]int64, 0, len(groups)+len(refresh))
+	grouped := map[int64]bool{}
+	for _, group := range groups {
+		ids = append(ids, group[0].ActionID)
+		grouped[group[0].ActionID] = true
+	}
+	var sampleOnly []int64
+	for _, id := range refresh {
+		if !grouped[id] {
+			ids = append(ids, id)
+			sampleOnly = append(sampleOnly, id)
+		}
+	}
+	items, batchErr := p.readBatch(ctx, dispatcher, wakeID, ids)
+	if errors.Is(batchErr, context.Canceled) || errors.Is(batchErr, context.DeadlineExceeded) || errors.Is(batchErr, guard.ErrAudit) {
+		return result, metricError("reading guarded metrics", batchErr)
+	}
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		first := group[0]
-		call := llm.ToolCall{ID: fmt.Sprintf("metric-%d-%d", wakeID, first.ActionID), Type: "function", Function: llm.CallFunction{Name: "read_own_metrics", Arguments: fmt.Sprintf(`{"action_id":%d}`, first.ActionID)}}
-		output, readErr := dispatcher.DispatchHarness(ctx, call)
-		if readErr != nil {
-			if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, guard.ErrAudit) {
-				return result, metricError("reading guarded metric", readErr)
-			}
-			reason := "read_failed"
-			if errors.Is(readErr, threads.ErrMetricsUnavailable) {
-				reason = "metrics_unavailable"
-			}
-			if errors.Is(readErr, threads.ErrLoggedOut) || errors.Is(readErr, threads.ErrCaptcha) {
-				reason = "auth_required"
-			}
-			if errors.Is(readErr, threads.ErrMediaNotFound) && p.gone(ctx, backend, first.ActionID) {
+		item, found := items[first.ActionID]
+		reason := item.Failure
+		switch {
+		case errors.Is(batchErr, errBinding) || (batchErr == nil && !found):
+			reason = "binding_mismatch"
+		case errors.Is(batchErr, threads.ErrLoggedOut) || errors.Is(batchErr, threads.ErrCaptcha):
+			reason = tools.FailureAuth
+		case batchErr != nil:
+			reason = tools.FailureRead
+		case reason == tools.FailureNotFound:
+			if p.gone(ctx, backend, first.ActionID) {
 				if e := p.opts.Store.EndGoneMetricJobs(ctx, group, p.opts.Now()); e != nil {
 					return result, metricError("ending metric targets", e)
 				}
 				pending = pending[1:]
 				continue
 			}
+			reason = tools.FailureRead
+		}
+		if reason != "" {
 			if e := p.deferJobs(ctx, wakeID, group, reason); e != nil {
 				return result, e
 			}
@@ -285,23 +314,9 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 			endReason = reason
 			continue
 		}
-		var envelope struct {
-			Untrusted bool                `json:"untrusted"`
-			Source    string              `json:"source"`
-			Data      tools.ActionMetrics `json:"data"`
-		}
-		if json.Unmarshal([]byte(output), &envelope) != nil || !envelope.Untrusted || envelope.Source != "read_own_metrics" || envelope.Data.ActionID != first.ActionID {
-			if e := p.deferJobs(ctx, wakeID, group, "binding_mismatch"); e != nil {
-				return result, e
-			}
-			result.DeferredJobs += len(group)
-			pending = pending[1:]
-			endReason = "binding_mismatch"
-			continue
-		}
 		at := p.opts.Now()
-		values := envelope.Data.Metrics
-		committed, e := p.opts.Store.CompleteMetricJobs(ctx, group, at, store.MetricValues{Views: values.Views, Likes: values.Likes, Replies: values.Replies, Reposts: values.Reposts, Quotes: values.Quotes, Shares: values.Shares, Followers: followers, AuthorReplied: envelope.Data.AuthorReplied})
+		values := item.Metrics
+		committed, e := p.opts.Store.CompleteMetricJobs(ctx, group, at, store.MetricValues{Views: values.Views, Likes: values.Likes, Replies: values.Replies, Reposts: values.Reposts, Quotes: values.Quotes, Shares: values.Shares, Followers: followers, AuthorReplied: item.AuthorReplied})
 		if e != nil {
 			// A stale/expired fence cannot write or release a newer claim. Leave it
 			// recoverable at lease expiry; other DB errors get a future retry if possible.
@@ -327,11 +342,98 @@ func (p *Processor) RunDue(ctx context.Context) (result Result, runErr error) {
 			}
 			p.emit(ctx, logging.Record{Event: logging.MetricsMeasured, WakeID: wakeID, ActionID: first.ActionID, TargetAt: earliest, MeasuredAt: at, LatenessMS: max(0, at.Sub(earliest).Milliseconds()), Outcome: "success", Reason: "sample_committed", Jobs: len(group), Samples: 1})
 			for _, job := range group {
-				p.emit(ctx, logging.Record{Event: logging.MetricsTargetCompleted, WakeID: wakeID, ActionID: job.ActionID, WindowHours: job.WindowHours, TargetAt: job.DueAt, MeasuredAt: at, LatenessMS: max(0, at.Sub(job.DueAt).Milliseconds()), Outcome: "success", Reason: "target_completed", Jobs: 1})
+				p.emit(ctx, logging.Record{Event: logging.MetricsTargetCompleted, WakeID: wakeID, ActionID: job.ActionID, WindowMinutes: job.WindowMinutes, TargetAt: job.DueAt, MeasuredAt: at, LatenessMS: max(0, at.Sub(job.DueAt).Milliseconds()), Outcome: "success", Reason: "target_completed", Jobs: 1})
 			}
 		}
 	}
+	for _, id := range sampleOnly {
+		item, found := items[id]
+		if batchErr != nil || !found || item.Failure != "" {
+			continue
+		}
+		values := item.Metrics
+		if e := p.opts.Store.RecordMetricSample(ctx, p.opts.Template.ID, id, p.opts.Now(), store.MetricValues{Views: values.Views, Likes: values.Likes, Replies: values.Replies, Reposts: values.Reposts, Quotes: values.Quotes, Shares: values.Shares, Followers: followers, AuthorReplied: item.AuthorReplied}); e != nil {
+			return result, metricError("recording refreshed sample", e)
+		}
+		result.Refreshed++
+	}
 	return result, nil
+}
+
+// errBinding means the guarded read answered with something other than the
+// untrusted metrics of the requested actions.
+var errBinding = errors.New("metric read did not match its request")
+
+// readBatch reads the actions' metrics in one guarded call and indexes them by
+// action id. A returned error that is not errBinding is the call's own: a
+// cancellation, an audit failure or a store failure.
+func (p *Processor) readBatch(ctx context.Context, dispatcher *tools.Dispatcher, wakeID int64, ids []int64) (map[int64]tools.ActionMetrics, error) {
+	args, err := json.Marshal(map[string][]int64{"action_ids": ids})
+	if err != nil {
+		return nil, err
+	}
+	call := llm.ToolCall{ID: fmt.Sprintf("metric-%d", wakeID), Type: "function", Function: llm.CallFunction{Name: "read_own_metrics", Arguments: string(args)}}
+	output, err := dispatcher.DispatchHarness(ctx, call)
+	if err != nil {
+		return nil, err
+	}
+	var envelope struct {
+		Untrusted bool                  `json:"untrusted"`
+		Source    string                `json:"source"`
+		Data      []tools.ActionMetrics `json:"data"`
+	}
+	if json.Unmarshal([]byte(output), &envelope) != nil || !envelope.Untrusted || envelope.Source != "read_own_metrics" || len(envelope.Data) != len(ids) {
+		return nil, errBinding
+	}
+	items := make(map[int64]tools.ActionMetrics, len(ids))
+	for i, item := range envelope.Data {
+		if item.ActionID != ids[i] {
+			return nil, errBinding
+		}
+		items[item.ActionID] = item
+	}
+	return items, nil
+}
+
+// Refresh samples the given own actions that are younger than a day now, apart
+// from the schedule, at most once per RefreshCooldown per action. It is the one
+// entry point for an operator or the dashboard asking for fresher numbers. The
+// result counts the samples stored.
+func (p *Processor) Refresh(ctx context.Context, actionIDs []int64) (Result, error) {
+	now := p.opts.Now()
+	young, err := p.opts.Store.YoungOwnActions(ctx, p.opts.Template.ID, actionIDs, now.Add(-refreshAge))
+	if err != nil {
+		return Result{}, metricError("reading young actions", err)
+	}
+	p.refreshMu.Lock()
+	if p.refreshLast == nil {
+		p.refreshLast = map[int64]time.Time{}
+	}
+	for id, at := range p.refreshLast {
+		if now.Sub(at) >= RefreshCooldown {
+			delete(p.refreshLast, id)
+		}
+	}
+	for _, id := range young {
+		if _, cooling := p.refreshLast[id]; !cooling {
+			p.refreshLast[id] = now
+			p.refreshQueue = append(p.refreshQueue, id)
+		}
+	}
+	queued := len(p.refreshQueue)
+	p.refreshMu.Unlock()
+	if queued == 0 {
+		return Result{}, nil
+	}
+	return p.RunDue(ctx)
+}
+
+func (p *Processor) takeRefresh() []int64 {
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
+	ids := p.refreshQueue
+	p.refreshQueue = nil
+	return ids
 }
 
 func (p *Processor) available(ctx context.Context) (bool, error) {
@@ -387,7 +489,7 @@ func (p *Processor) deferJobs(ctx context.Context, wakeID int64, jobs []store.Me
 		return metricError("deferring metric targets", err)
 	}
 	for _, job := range jobs {
-		p.emit(finalCtx, logging.Record{Event: logging.MetricsDeferred, WakeID: wakeID, ActionID: job.ActionID, WindowHours: job.WindowHours, TargetAt: job.DueAt, Outcome: "deferred", Reason: reason, Jobs: len(jobs)})
+		p.emit(finalCtx, logging.Record{Event: logging.MetricsDeferred, WakeID: wakeID, ActionID: job.ActionID, WindowMinutes: job.WindowMinutes, TargetAt: job.DueAt, Outcome: "deferred", Reason: reason, Jobs: len(jobs)})
 	}
 	return nil
 }

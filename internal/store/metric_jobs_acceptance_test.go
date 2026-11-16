@@ -119,10 +119,10 @@ func metricAcceptanceOnlySample(t *testing.T, st *store.Store, actionID int64) (
 	return measured, samples[0].values
 }
 
-func metricAcceptanceWindowHours(jobs []store.MetricJob) map[int]bool {
+func metricAcceptanceWindowMinutes(jobs []store.MetricJob) map[int]bool {
 	windows := make(map[int]bool)
 	for _, job := range jobs {
-		windows[job.WindowHours] = true
+		windows[job.WindowMinutes] = true
 	}
 	return windows
 }
@@ -182,8 +182,8 @@ func TestMetricJobsAcceptanceSeedExactWindowsConfirmedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SeedMetricJobs: %v", err)
 	}
-	if seeded != 6 {
-		t.Fatalf("SeedMetricJobs seeded %d jobs, want 6 for two confirmed actions at three windows each", seeded)
+	if seeded != 2*len(store.MetricWindowMinutes) {
+		t.Fatalf("SeedMetricJobs seeded %d jobs, want one per offset for two confirmed actions", seeded)
 	}
 	again, err := st.SeedMetricJobs(ctx, "agent-a", time.Unix(0, 0))
 	if err != nil {
@@ -197,16 +197,16 @@ func TestMetricJobsAcceptanceSeedExactWindowsConfirmedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextMetricDue: %v", err)
 	}
-	if !ok || !due.Equal(metricAcceptanceBase.Add(time.Hour)) {
-		t.Fatalf("NextMetricDue = %v,%v, want %v,true", due, ok, metricAcceptanceBase.Add(time.Hour))
+	if !ok || !due.Equal(metricAcceptanceBase.Add(15*time.Minute)) {
+		t.Fatalf("NextMetricDue = %v,%v, want %v,true", due, ok, metricAcceptanceBase.Add(15*time.Minute))
 	}
 
-	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", metricAcceptanceBase.Add(26*time.Hour), time.Minute, 10)
+	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", metricAcceptanceBase.Add(8*24*time.Hour), time.Minute, 10)
 	if err != nil {
 		t.Fatalf("ClaimMetricJobs catch-up: %v", err)
 	}
-	if len(jobs) != 6 {
-		t.Fatalf("ClaimMetricJobs returned %d jobs, want 6 coalesced windows across two actions: %+v", len(jobs), jobs)
+	if len(jobs) != 2*len(store.MetricWindowMinutes) {
+		t.Fatalf("ClaimMetricJobs returned %d jobs, want every window coalesced across two actions: %+v", len(jobs), jobs)
 	}
 	byAction := make(map[int64][]store.MetricJob)
 	for _, job := range jobs {
@@ -219,8 +219,8 @@ func TestMetricJobsAcceptanceSeedExactWindowsConfirmedOnly(t *testing.T) {
 		}
 	}
 	postJobs := byAction[confirmed]
-	if len(postJobs) != 3 {
-		t.Fatalf("confirmed post has %d jobs, want 3: %+v", len(postJobs), postJobs)
+	if len(postJobs) != len(store.MetricWindowMinutes) {
+		t.Fatalf("confirmed post has %d jobs, want one per offset: %+v", len(postJobs), postJobs)
 	}
 	for _, job := range postJobs {
 		if !job.PostedAt.Equal(metricAcceptanceBase) {
@@ -233,16 +233,16 @@ func TestMetricJobsAcceptanceSeedExactWindowsConfirmedOnly(t *testing.T) {
 			t.Fatalf("job ClaimVersion = %d, want a positive fencing version", job.ClaimVersion)
 		}
 	}
-	windows := metricAcceptanceWindowHours(postJobs)
-	for _, window := range []int{1, 6, 24} {
+	windows := metricAcceptanceWindowMinutes(postJobs)
+	for _, window := range store.MetricWindowMinutes {
 		if !windows[window] {
-			t.Fatalf("post windows = %v, want window %dh", windows, window)
+			t.Fatalf("post windows = %v, want window %dm", windows, window)
 		}
 	}
 	for _, job := range postJobs {
-		want := metricAcceptanceBase.Add(time.Duration(job.WindowHours) * time.Hour)
+		want := metricAcceptanceBase.Add(time.Duration(job.WindowMinutes) * time.Minute)
 		if !job.DueAt.Equal(want) {
-			t.Fatalf("window %dh DueAt = %v, want exact target %v", job.WindowHours, job.DueAt, want)
+			t.Fatalf("window %dm DueAt = %v, want exact target %v", job.WindowMinutes, job.DueAt, want)
 		}
 	}
 
@@ -277,8 +277,8 @@ func TestMetricJobsAcceptanceSeedRejectsMalformedEligibleTimeAtomically(t *testi
 	if err != nil {
 		t.Fatalf("SeedMetricJobs with malformed dry-run action: %v", err)
 	}
-	if seeded != 3 {
-		t.Fatalf("SeedMetricJobs seeded %d jobs, want 3 for the only confirmed action", seeded)
+	if seeded != len(store.MetricWindowMinutes) {
+		t.Fatalf("SeedMetricJobs seeded %d jobs, want one per offset for the only confirmed action", seeded)
 	}
 }
 
@@ -289,57 +289,48 @@ func TestMetricJobsAcceptanceExactDueAndLeaseBoundaries(t *testing.T) {
 	actionID := metricAcceptanceSeedAction(t, st, "agent-a", metricAcceptanceBase)
 
 	lease := 5 * time.Minute
-	due1 := metricAcceptanceBase.Add(time.Hour)
-	due6 := metricAcceptanceBase.Add(6 * time.Hour)
-	due24 := metricAcceptanceBase.Add(24 * time.Hour)
+	first := store.MetricWindowMinutes[0]
+	due := func(minutes int) time.Time { return metricAcceptanceBase.Add(time.Duration(minutes) * time.Minute) }
 
-	if jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due1.Add(-time.Nanosecond), lease, 10); err != nil || len(jobs) != 0 {
+	if jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due(first).Add(-time.Nanosecond), lease, 10); err != nil || len(jobs) != 0 {
 		t.Fatalf("claim one nanosecond before due = %+v,%v, want none", jobs, err)
 	}
-	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due1, lease, 10)
-	if err != nil || len(jobs) != 1 || jobs[0].WindowHours != 1 || jobs[0].ActionID != actionID {
-		t.Fatalf("claim exactly at 1h due = %+v,%v, want the 1h job", jobs, err)
+	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due(first), lease, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].WindowMinutes != first || jobs[0].ActionID != actionID {
+		t.Fatalf("claim exactly at the first due = %+v,%v, want that job", jobs, err)
 	}
 	firstVersion := jobs[0].ClaimVersion
-	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(due1.Add(lease)) {
-		t.Fatalf("NextMetricDue during lease = %v,%v,%v, want lease expiry %v", next, ok, err, due1.Add(lease))
+	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(due(first).Add(lease)) {
+		t.Fatalf("NextMetricDue during lease = %v,%v,%v, want lease expiry %v", next, ok, err, due(first).Add(lease))
 	}
-	if jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due1.Add(lease-time.Nanosecond), lease, 10); err != nil || len(jobs) != 0 {
+	if jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due(first).Add(lease-time.Nanosecond), lease, 10); err != nil || len(jobs) != 0 {
 		t.Fatalf("claim one nanosecond before lease expiry = %+v,%v, want none", jobs, err)
 	}
-	if _, err := st.CompleteMetricJobs(ctx, jobs, due1.Add(lease), store.MetricValues{Views: 1}); !errors.Is(err, store.ErrMetricClaim) {
+	if _, err := st.CompleteMetricJobs(ctx, jobs, due(first).Add(lease), store.MetricValues{Views: 1}); !errors.Is(err, store.ErrMetricClaim) {
 		t.Fatalf("complete at exact lease expiry error = %v, want ErrMetricClaim", err)
 	}
-	reclaimed, err := st.ClaimMetricJobs(ctx, "agent-a", due1.Add(lease), lease, 10)
-	if err != nil || len(reclaimed) != 1 || reclaimed[0].WindowHours != 1 {
-		t.Fatalf("reclaim exactly at lease expiry = %+v,%v, want the 1h job", reclaimed, err)
+	reclaimed, err := st.ClaimMetricJobs(ctx, "agent-a", due(first).Add(lease), lease, 10)
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].WindowMinutes != first {
+		t.Fatalf("reclaim exactly at lease expiry = %+v,%v, want the first job", reclaimed, err)
 	}
 	if reclaimed[0].ClaimVersion <= firstVersion {
 		t.Fatalf("reclaimed version = %d, want greater than stale version %d", reclaimed[0].ClaimVersion, firstVersion)
 	}
-	if ok, err := st.CompleteMetricJobs(ctx, reclaimed, due1.Add(lease+time.Second), store.MetricValues{Views: 7, Likes: 2}); err != nil || !ok {
+	if ok, err := st.CompleteMetricJobs(ctx, reclaimed, due(first).Add(lease+time.Second), store.MetricValues{Views: 7, Likes: 2}); err != nil || !ok {
 		t.Fatalf("complete fresh reclaim = %v,%v, want true,nil", ok, err)
 	}
 
-	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(due6) {
-		t.Fatalf("NextMetricDue after 1h completion = %v,%v,%v, want %v", next, ok, err, due6)
-	}
-	jobs, err = st.ClaimMetricJobs(ctx, "agent-a", due6, lease, 10)
-	if err != nil || len(jobs) != 1 || jobs[0].WindowHours != 6 {
-		t.Fatalf("claim exactly at 6h due = %+v,%v, want the 6h job", jobs, err)
-	}
-	if ok, err := st.CompleteMetricJobs(ctx, jobs, due6.Add(time.Minute), store.MetricValues{Views: 9}); err != nil || !ok {
-		t.Fatalf("complete 6h job = %v,%v", ok, err)
-	}
-	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(due24) {
-		t.Fatalf("NextMetricDue after 6h completion = %v,%v,%v, want %v", next, ok, err, due24)
-	}
-	jobs, err = st.ClaimMetricJobs(ctx, "agent-a", due24, lease, 10)
-	if err != nil || len(jobs) != 1 || jobs[0].WindowHours != 24 {
-		t.Fatalf("claim exactly at 24h due = %+v,%v, want the 24h job", jobs, err)
-	}
-	if ok, err := st.CompleteMetricJobs(ctx, jobs, due24.Add(time.Minute), store.MetricValues{Views: 11}); err != nil || !ok {
-		t.Fatalf("complete 24h job = %v,%v", ok, err)
+	for i, minutes := range store.MetricWindowMinutes[1:] {
+		if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(due(minutes)) {
+			t.Fatalf("NextMetricDue before the %dm target = %v,%v,%v, want %v", minutes, next, ok, err, due(minutes))
+		}
+		jobs, err = st.ClaimMetricJobs(ctx, "agent-a", due(minutes), lease, 10)
+		if err != nil || len(jobs) != 1 || jobs[0].WindowMinutes != minutes {
+			t.Fatalf("claim exactly at the %dm due = %+v,%v, want that job", minutes, jobs, err)
+		}
+		if ok, err := st.CompleteMetricJobs(ctx, jobs, due(minutes).Add(time.Minute), store.MetricValues{Views: int64(10 * (i + 2))}); err != nil || !ok {
+			t.Fatalf("complete the %dm job = %v,%v", minutes, ok, err)
+		}
 	}
 	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || ok {
 		t.Fatalf("NextMetricDue after all windows = %v,%v,%v, want no pending target", next, ok, err)
@@ -357,11 +348,11 @@ func TestMetricJobsAcceptanceCoalescesDueWindowsIntoOneActualSample(t *testing.T
 	if err != nil {
 		t.Fatalf("ClaimMetricJobs at 6h: %v", err)
 	}
-	if len(jobs) != 2 {
-		t.Fatalf("claim at 6h returned %d jobs, want the coalesced 1h and 6h jobs: %+v", len(jobs), jobs)
+	if len(jobs) != 4 {
+		t.Fatalf("claim at 6h returned %d jobs, want the coalesced 15m, 1h, 3h and 6h jobs: %+v", len(jobs), jobs)
 	}
-	if windows := metricAcceptanceWindowHours(jobs); !windows[1] || !windows[6] || windows[24] {
-		t.Fatalf("coalesced windows = %v, want {1,6} and not 24", windows)
+	if windows := metricAcceptanceWindowMinutes(jobs); !windows[15] || !windows[60] || !windows[180] || !windows[360] || windows[720] {
+		t.Fatalf("coalesced windows = %v, want {15,60,180,360} and not 720", windows)
 	}
 
 	measuredAt := at6.Add(17 * time.Minute)
@@ -388,8 +379,8 @@ func TestMetricJobsAcceptanceCoalescesDueWindowsIntoOneActualSample(t *testing.T
 	if count := metricAcceptanceSampleCount(t, st, "agent-a", actionID); count != 1 {
 		t.Fatalf("repeat completion inserted another sample, count = %d", count)
 	}
-	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(metricAcceptanceBase.Add(24*time.Hour)) {
-		t.Fatalf("NextMetricDue after coalesced completion = %v,%v,%v, want the 24h target", next, ok, err)
+	if next, ok, err := st.NextMetricDue(ctx, "agent-a"); err != nil || !ok || !next.Equal(metricAcceptanceBase.Add(12*time.Hour)) {
+		t.Fatalf("NextMetricDue after coalesced completion = %v,%v,%v, want the 12h target", next, ok, err)
 	}
 }
 
@@ -408,7 +399,7 @@ func TestMetricJobsAcceptanceActionAndAgentIsolation(t *testing.T) {
 		}
 	}
 
-	due := metricAcceptanceBase.Add(time.Hour)
+	due := metricAcceptanceBase.Add(15 * time.Minute)
 	aJobs, err := st.ClaimMetricJobs(ctx, "agent-a", due, 10*time.Minute, 1)
 	if err != nil || len(aJobs) != 1 {
 		t.Fatalf("first agent-a claim = %+v,%v, want one action group", aJobs, err)
@@ -509,7 +500,7 @@ func TestMetricJobsAcceptanceConcurrentClaimsAreExclusive(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for attempt := 0; attempt < 2000; attempt++ {
-				jobs, err := st.ClaimMetricJobs(ctx, "agent-a", metricAcceptanceBase.Add(time.Hour), time.Minute, 1)
+				jobs, err := st.ClaimMetricJobs(ctx, "agent-a", metricAcceptanceBase.Add(15*time.Minute), time.Minute, 1)
 				if err != nil {
 					// SQLite may report a transient busy error to one writer.
 					runtime.Gosched()
@@ -556,7 +547,7 @@ func TestMetricJobsAcceptanceStaleFenceAndExpiryRecovery(t *testing.T) {
 	metricAcceptanceAgent(t, st, "agent-a")
 	actionID := metricAcceptanceSeedAction(t, st, "agent-a", metricAcceptanceBase)
 
-	due := metricAcceptanceBase.Add(time.Hour)
+	due := metricAcceptanceBase.Add(15 * time.Minute)
 	lease := 3 * time.Minute
 	old, err := st.ClaimMetricJobs(ctx, "agent-a", due, lease, 10)
 	if err != nil || len(old) != 1 {
@@ -593,10 +584,10 @@ func TestMetricJobsAcceptanceCompleteRollsBackSampleAndCheckpoint(t *testing.T) 
 	metricAcceptanceAgent(t, st, "agent-a")
 	actionID := metricAcceptanceSeedAction(t, st, "agent-a", metricAcceptanceBase)
 
-	at := metricAcceptanceBase.Add(25 * time.Hour)
+	at := metricAcceptanceBase.Add(8 * 24 * time.Hour)
 	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", at, 5*time.Minute, 10)
-	if err != nil || len(jobs) != 3 {
-		t.Fatalf("claim for rollback = %+v,%v, want three coalesced windows", jobs, err)
+	if err != nil || len(jobs) != len(store.MetricWindowMinutes) {
+		t.Fatalf("claim for rollback = %+v,%v, want every window coalesced", jobs, err)
 	}
 	measured := at.Add(time.Minute)
 
@@ -655,7 +646,7 @@ func TestMetricJobsAcceptanceCompleteRejectsInvalidValuesAndScopes(t *testing.T)
 		t.Fatalf("seeding foreign action: %v", err)
 	}
 
-	due := metricAcceptanceBase.Add(time.Hour)
+	due := metricAcceptanceBase.Add(15 * time.Minute)
 	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due, 5*time.Minute, 10)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claim for value validation = %+v,%v", jobs, err)
@@ -709,7 +700,7 @@ func TestMetricJobsAcceptanceDeferRetriesAndValidates(t *testing.T) {
 			st := metricAcceptanceStore(t)
 			metricAcceptanceAgent(t, st, "agent-a")
 			actionID := metricAcceptanceSeedAction(t, st, "agent-a", metricAcceptanceBase)
-			due := metricAcceptanceBase.Add(time.Hour)
+			due := metricAcceptanceBase.Add(15 * time.Minute)
 			jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due, 5*time.Minute, 10)
 			if err != nil || len(jobs) != 1 {
 				t.Fatalf("claim before defer = %+v,%v", jobs, err)
@@ -746,7 +737,7 @@ func TestMetricJobsAcceptanceDeferRetriesAndValidates(t *testing.T) {
 		st := metricAcceptanceStore(t)
 		metricAcceptanceAgent(t, st, "agent-a")
 		actionID := metricAcceptanceSeedAction(t, st, "agent-a", metricAcceptanceBase)
-		due := metricAcceptanceBase.Add(time.Hour)
+		due := metricAcceptanceBase.Add(15 * time.Minute)
 		jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due, 5*time.Minute, 10)
 		if err != nil || len(jobs) != 1 {
 			t.Fatalf("claim before invalid defer = %+v,%v", jobs, err)
@@ -783,7 +774,7 @@ func TestMetricJobsAcceptancePausedAndKilledAgentsAreRefused(t *testing.T) {
 	st := metricAcceptanceStore(t)
 	metricAcceptanceAgent(t, st, "agent-a")
 	metricAcceptanceSeedAction(t, st, "agent-a", metricAcceptanceBase)
-	due := metricAcceptanceBase.Add(time.Hour)
+	due := metricAcceptanceBase.Add(15 * time.Minute)
 
 	for _, status := range []string{"paused", "killed"} {
 		status := status
@@ -919,7 +910,7 @@ func TestMetricJobsAcceptanceMissingCancelledAndClosedStore(t *testing.T) {
 	if _, err := st.SeedMetricJobs(ctx, "agent-a", time.Unix(0, 0)); err != nil {
 		t.Fatalf("seeding cancellation fixture: %v", err)
 	}
-	due := metricAcceptanceBase.Add(time.Hour)
+	due := metricAcceptanceBase.Add(15 * time.Minute)
 	jobs, err := st.ClaimMetricJobs(ctx, "agent-a", due, 5*time.Minute, 10)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claiming cancellation fixture = %+v,%v", jobs, err)

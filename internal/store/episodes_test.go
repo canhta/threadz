@@ -40,7 +40,7 @@ func seed(t *testing.T, st *store.Store, agent, kind string, views, likes, repli
 			}
 		}
 		due := posted.Add(time.Duration(w) * time.Hour).Format(time.RFC3339Nano)
-		if _, err = db.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_hours,due_at,not_before,completed_at) VALUES(?,?,?,?,?,?)`, agent, id, w, due, due, done); err != nil {
+		if _, err = db.Exec(`INSERT INTO metric_jobs(agent_id,action_id,window_minutes,due_at,not_before,completed_at) VALUES(?,?,?,?,?,?)`, agent, id, w*60, due, due, done); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -27,7 +27,7 @@ func TestProcessorCloseFailureKeepsCompletedMetricScope(t *testing.T) {
 	}
 	defer st.Close()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	now := start.Add(time.Hour)
+	now := start.Add(15 * time.Minute)
 	tmpl := config.Template{ID: "own", DryRun: true, Limits: config.LimitsConfig{MinMinutesBetweenWakes: 15}}
 	if err = st.EnsureAgent(ctx, tmpl.ID); err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestProcessorCloseFailureKeepsCompletedMetricScope(t *testing.T) {
 	}
 }
 
-func TestProcessorThreeWindowsAndCatchupUseActualObservation(t *testing.T) {
+func TestProcessorWindowsAndCatchupUseActualObservation(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "metrics.db"))
 	if err != nil {
@@ -80,22 +80,28 @@ func TestProcessorThreeWindowsAndCatchupUseActualObservation(t *testing.T) {
 		return p
 	}
 	p := makeProcessor()
-	for _, tc := range []struct{ hour, jobs, samples int }{{0, 0, 0}, {1, 1, 1}, {1, 0, 0}, {25, 2, 1}, {48, 0, 0}} {
-		now = start.Add(time.Duration(tc.hour) * time.Hour)
-		if tc.hour == 25 {
+	// The catch-up at 25h finds five overdue targets (1h to 24h) and, the action
+	// being flat since the 15 minute sample, settles the three after it.
+	for _, tc := range []struct{ minute, jobs, samples int }{{0, 0, 0}, {15, 1, 1}, {15, 0, 0}, {25 * 60, 5, 1}, {48 * 60, 0, 0}} {
+		now = start.Add(time.Duration(tc.minute) * time.Minute)
+		if tc.minute == 25*60 {
 			p = makeProcessor()
 		}
 		got, e := p.RunDue(ctx)
 		if e != nil || got.ClaimedJobs != tc.jobs || got.Samples != tc.samples {
-			t.Fatalf("hour%d got=%+v err=%v", tc.hour, got, e)
+			t.Fatalf("minute %d got=%+v err=%v", tc.minute, got, e)
 		}
+	}
+	var settled int
+	if e := st.DB().QueryRow(`SELECT COUNT(*) FROM metric_jobs WHERE completed_at IS NOT NULL AND reason='settled'`).Scan(&settled); e != nil || settled != 3 {
+		t.Fatalf("settled jobs=%d %v", settled, e)
 	}
 	var n int
 	if e := st.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE action_id=1`).Scan(&n); e != nil || n != 2 {
 		t.Fatalf("samples=%d %v", n, e)
 	}
-	if source.Count(threads.OpReadOwnMetrics) != 2 || source.Count(threads.OpClose) != 2 {
-		t.Fatalf("reads=%d closed=%d", source.Count(threads.OpReadOwnMetrics), source.Count(threads.OpClose))
+	if source.Count(threads.OpReadActionMetrics) != 2 || source.Count(threads.OpClose) != 2 {
+		t.Fatalf("reads=%d closed=%d", source.Count(threads.OpReadActionMetrics), source.Count(threads.OpClose))
 	}
 	if e := st.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE action_id=1 AND followers=7`).Scan(&n); e != nil || n != 2 {
 		t.Fatalf("samples stamped with the recorded followers=%d %v", n, e)

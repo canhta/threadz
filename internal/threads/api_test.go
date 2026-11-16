@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -149,15 +150,19 @@ func TestAPIInsightsAndFollowers(t *testing.T) {
 		t.Fatalf("account=%+v err=%v", m, err)
 	}
 
-	f.route("GET", "/2000000000000001/insights", "post_insights.json")
-	m, err = api.ReadActionMetrics(ctx, "2000000000000001")
-	if err != nil || !reflect.DeepEqual(m, Metrics{Views: 1500, Likes: 42, Replies: 7, Reposts: 3, Quotes: n64(2), Shares: n64(5)}) {
-		t.Fatalf("post insights=%+v err=%v", m, err)
+	f.route("GET", "/insights", batchBody("2000000000000001", string(apiFixture(t, "post_insights.json"))))
+	f.route("GET", "/", `{"2000000000000001":{"id":"2000000000000001","is_reply":false}}`)
+	got := api.ReadActionMetricsBatch(ctx, []string{"2000000000000001"})["2000000000000001"]
+	if got.Err != nil || !reflect.DeepEqual(got.Metrics, Metrics{Views: 1500, Likes: 42, Replies: 7, Reposts: 3, Quotes: n64(2), Shares: n64(5)}) {
+		t.Fatalf("post insights=%+v", got)
 	}
-	if got := f.queries["GET /2000000000000001/insights"]["metric"]; got != "views,likes,replies,reposts,quotes,shares" {
-		t.Fatalf("metric list %q", got)
+	if q := f.queries["GET /insights"]; q["metric"] != "views,likes,replies,reposts,quotes,shares" || q["ids"] != "2000000000000001" {
+		t.Fatalf("insights query %v", q)
 	}
 }
+
+// batchBody is an `ids=` response for one id.
+func batchBody(id, insights string) string { return `{"` + id + `":` + insights + `}` }
 
 func n64(v int64) *int64 { return &v }
 
@@ -168,38 +173,118 @@ func TestAPIPostInsightsMissingCountersAreUnavailable(t *testing.T) {
 		"no counts": `{"data":[]}`,
 	} {
 		f, api, _ := newFake(t)
-		f.route("GET", "/2000000000000001/insights", body)
-		if _, err := api.ReadActionMetrics(context.Background(), "2000000000000001"); !errors.Is(err, ErrMetricsUnavailable) {
-			t.Fatalf("%s: err=%v", name, err)
+		f.route("GET", "/insights", batchBody("2000000000000001", body))
+		if got := api.ReadActionMetricsBatch(context.Background(), []string{"2000000000000001"})["2000000000000001"]; !errors.Is(got.Err, ErrMetricsUnavailable) {
+			t.Fatalf("%s: err=%v", name, got.Err)
 		}
 	}
 	f, api, _ := newFake(t)
-	f.route("GET", "/2000000000000001/insights", `{"data":[{"name":"views","values":[{"value":9}]},{"name":"likes","values":[{"value":1}]},{"name":"replies","values":[{"value":0}]},{"name":"reposts","values":[{"value":0}]}]}`)
-	m, err := api.ReadActionMetrics(context.Background(), "2000000000000001")
-	if err != nil || m.Quotes != nil || m.Shares != nil || m.Followers != nil {
-		t.Fatalf("absent quotes and shares must stay nil: %+v err=%v", m, err)
+	f.route("GET", "/insights", batchBody("2000000000000001", `{"data":[{"name":"views","values":[{"value":9}]},{"name":"likes","values":[{"value":1}]},{"name":"replies","values":[{"value":0}]},{"name":"reposts","values":[{"value":0}]}]}`))
+	f.route("GET", "/", `{"2000000000000001":{"id":"2000000000000001"}}`)
+	got := api.ReadActionMetricsBatch(context.Background(), []string{"2000000000000001"})["2000000000000001"]
+	if got.Err != nil || got.Metrics.Quotes != nil || got.Metrics.Shares != nil || got.Metrics.Followers != nil {
+		t.Fatalf("absent quotes and shares must stay nil: %+v", got)
 	}
 }
 
 func TestAPIReplyRepliesComeFromDirectReplies(t *testing.T) {
 	const zero = `{"data":[{"name":"views","values":[{"value":9}]},{"name":"likes","values":[{"value":2}]},{"name":"replies","values":[{"value":0}]},{"name":"reposts","values":[{"value":0}]}]}`
+	const five = `{"data":[{"name":"views","values":[{"value":9}]},{"name":"likes","values":[{"value":1}]},{"name":"replies","values":[{"value":5}]},{"name":"reposts","values":[{"value":0}]}]}`
 	f, api, _ := newFake(t)
-	f.route("GET", "/3/insights", zero)
-	f.route("GET", "/3", `{"id":"3","is_reply":true}`)
+	f.route("GET", "/insights", `{"3":`+zero+`,"4":`+five+`}`)
+	f.route("GET", "/", `{"3":{"id":"3","is_reply":true},"4":{"id":"4","is_reply":false}}`)
 	f.route("GET", "/3/replies", `{"data":[{"id":"a"},{"id":"b"}]}`)
-	if m, err := api.ReadActionMetrics(context.Background(), "3"); err != nil || m.Replies != 2 || m.Likes != 2 {
-		t.Fatalf("reply: %+v err=%v", m, err)
-	}
-	f.route("GET", "/3/replies", "error.json")
-	if m, err := api.ReadActionMetrics(context.Background(), "3"); err != nil || m.Replies != 0 {
-		t.Fatalf("failed /replies keeps insights: %+v err=%v", m, err)
+	got := api.ReadActionMetricsBatch(context.Background(), []string{"3", "4"})
+	if got["3"].Err != nil || got["3"].Metrics.Replies != 2 || got["3"].Metrics.Likes != 2 {
+		t.Fatalf("reply: %+v", got["3"])
 	}
 	// A post keeps its insights value and never reads /replies.
-	f.route("GET", "/4/insights", `{"data":[{"name":"views","values":[{"value":9}]},{"name":"likes","values":[{"value":1}]},{"name":"replies","values":[{"value":5}]},{"name":"reposts","values":[{"value":0}]}]}`)
-	f.route("GET", "/4", `{"id":"4","is_reply":false}`)
-	f.route("GET", "/4/replies", `{"data":[{"id":"a"}]}`)
-	if m, err := api.ReadActionMetrics(context.Background(), "4"); err != nil || m.Replies != 5 || f.count("GET /4/replies") != 0 {
-		t.Fatalf("post: %+v err=%v", m, err)
+	if got["4"].Err != nil || got["4"].Metrics.Replies != 5 || f.count("GET /4/replies") != 0 {
+		t.Fatalf("post: %+v", got["4"])
+	}
+	if f.count("GET /") != 1 {
+		t.Fatalf("is_reply lookups = %d, want one batched call", f.count("GET /"))
+	}
+	f.route("GET", "/3/replies", "error.json")
+	if got := api.ReadActionMetricsBatch(context.Background(), []string{"3"}); got["3"].Err != nil || got["3"].Metrics.Replies != 0 {
+		t.Fatalf("failed /replies keeps insights: %+v", got["3"])
+	}
+	f.route("GET", "/", "error.json")
+	if got := api.ReadActionMetricsBatch(context.Background(), []string{"3"}); got["3"].Err != nil || got["3"].Metrics.Replies != 0 {
+		t.Fatalf("failed is_reply lookup keeps insights: %+v", got["3"])
+	}
+}
+
+func TestAPIBatchReadFixtureAndChunks(t *testing.T) {
+	f, api, _ := newFake(t)
+	f.route("GET", "/insights", "ids_batch_insights.json")
+	f.route("GET", "/", `{}`)
+	got := api.ReadActionMetricsBatch(context.Background(), []string{"18133420354838558", "18135105970741033"})
+	if len(got) != 2 || got["18133420354838558"].Metrics.Views != 1500 || got["18135105970741033"].Metrics.Likes != 4 || f.count("GET /insights") != 1 {
+		t.Fatalf("batch=%+v calls=%d", got, f.count("GET /insights"))
+	}
+
+	// The saved views-only response has the same shape: other counters are missing.
+	f, api, _ = newFake(t)
+	f.route("GET", "/insights", "ids_batch_views.json")
+	for id, r := range api.ReadActionMetricsBatch(context.Background(), []string{"18133420354838558", "18135105970741033"}) {
+		if !errors.Is(r.Err, ErrMetricsUnavailable) {
+			t.Errorf("%s: err=%v, want unavailable", id, r.Err)
+		}
+	}
+
+	f, api, _ = newFake(t)
+	f.route("GET", "/insights", `{}`)
+	var ids []string
+	for i := range 2*InsightsBatchIDs + 3 {
+		ids = append(ids, strconv.Itoa(1000+i))
+	}
+	got = api.ReadActionMetricsBatch(context.Background(), ids)
+	if len(got) != len(ids) || f.count("GET /insights") != 3 {
+		t.Fatalf("%d ids gave %d results over %d calls, want 3 calls", len(ids), len(got), f.count("GET /insights"))
+	}
+	if last := strings.Split(f.queries["GET /insights"]["ids"], ","); len(last) != 3 {
+		t.Fatalf("last chunk has %d ids, want 3", len(last))
+	}
+}
+
+func TestAPIBatchReadPartialFailure(t *testing.T) {
+	ok := string(apiFixture(t, "post_insights.json"))
+	// One rejected id fails the whole batch call: its ids are read again one by one.
+	f, api, _ := newFake(t)
+	f.route("GET", "/insights", "error_invalid_id.json", batchBody("1", ok), "error_invalid_id.json")
+	f.route("GET", "/", `{"1":{"id":"1"}}`)
+	got := api.ReadActionMetricsBatch(context.Background(), []string{"1", "2"})
+	if got["1"].Err != nil || got["1"].Metrics.Views != 1500 || !errors.Is(got["2"].Err, ErrMediaNotFound) || f.count("GET /insights") != 3 {
+		t.Fatalf("results=%+v calls=%d", got, f.count("GET /insights"))
+	}
+
+	// A per-id error object and a missing id are failures of that id only.
+	f, api, _ = newFake(t)
+	f.route("GET", "/insights", `{"1":`+ok+`,"2":{"error":{"code":100}},"3":{"error":{"code":2}}}`)
+	f.route("GET", "/", `{"1":{"id":"1"}}`)
+	got = api.ReadActionMetricsBatch(context.Background(), []string{"1", "2", "3", "4"})
+	if got["1"].Err != nil || !errors.Is(got["2"].Err, ErrMediaNotFound) || !errors.Is(got["3"].Err, ErrMetricsUnavailable) || !errors.Is(got["4"].Err, ErrMetricsUnavailable) {
+		t.Fatalf("results=%+v", got)
+	}
+
+	// Any other failure of a call fails every id of that call and no other.
+	f, api, _ = newFake(t)
+	f.route("GET", "/insights", "error.json", `{"26":`+ok+`}`)
+	f.route("GET", "/", `{}`)
+	var ids []string
+	for i := range InsightsBatchIDs + 1 {
+		ids = append(ids, strconv.Itoa(i+1))
+	}
+	got = api.ReadActionMetricsBatch(context.Background(), ids)
+	failed := 0
+	for _, id := range ids[:InsightsBatchIDs] {
+		if errors.Is(got[id].Err, ErrAPI) {
+			failed++
+		}
+	}
+	if failed != InsightsBatchIDs || got["26"].Err != nil || got["26"].Metrics.Views != 1500 {
+		t.Fatalf("failed=%d last=%+v", failed, got["26"])
 	}
 }
 

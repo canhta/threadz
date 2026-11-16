@@ -3,6 +3,7 @@ package store
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"time"
@@ -39,7 +40,7 @@ type Episode struct {
 	// LongAt is when the action first had a sample at the 6h window or later.
 	LongAt                          time.Time
 	ParentReplies, ParentAgeMinutes *int64
-	// Window is the completed metric_jobs target in hours: 1, 6 or 24.
+	// Window is the completed metric_jobs target in hours, one of CohortWindowMinutes.
 	Window                int
 	Views, Likes, Replies int64
 	// Score is Likes + ReplyScoreWeight*Replies at Window.
@@ -69,12 +70,13 @@ type sample struct{ id, views, score int64 }
 // ranked against the RankPool newest actions of its kind that have a sample at
 // the same window, itself included.
 func (s *Store) Episodes(ctx context.Context, agentID string, q EpisodeQuery) ([]Episode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.kind,a.text,a.hook,a.angle,a.fact,a.target_username,a.thread_url,a.posted_at,a.parent_replies,a.parent_age_minutes,j.window_hours,m.measured_at,m.views,m.likes,m.replies
+	cohort, _ := json.Marshal(CohortWindowMinutes)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.kind,a.text,a.hook,a.angle,a.fact,a.target_username,a.thread_url,a.posted_at,a.parent_replies,a.parent_age_minutes,j.window_minutes/60,m.measured_at,m.views,m.likes,m.replies
 		FROM actions a
-		JOIN metric_jobs j ON j.agent_id=a.agent_id AND j.action_id=a.id AND j.completed_at IS NOT NULL AND j.reason=''
+		JOIN metric_jobs j ON j.agent_id=a.agent_id AND j.action_id=a.id AND j.completed_at IS NOT NULL AND j.reason='' AND j.window_minutes IN (SELECT value FROM json_each(?))
 		JOIN metrics m ON m.action_id=a.id AND m.measured_at=j.completed_at
 		WHERE a.agent_id=? AND a.dry_run=0 AND a.failed=0 AND a.thread_url<>'' AND a.media_id<>''
-		ORDER BY a.id`, agentID)
+		ORDER BY a.id`, string(cohort), agentID)
 	if err != nil {
 		return nil, fmt.Errorf("reading episodes: %w", err)
 	}

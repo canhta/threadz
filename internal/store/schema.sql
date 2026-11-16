@@ -113,7 +113,7 @@ CREATE TABLE lessons (
 CREATE TABLE metric_jobs (
     agent_id TEXT NOT NULL,
     action_id INTEGER NOT NULL,
-    window_hours INTEGER NOT NULL CHECK(window_hours IN (1,6,24)),
+    window_minutes INTEGER NOT NULL CHECK(window_minutes IN (15,60,180,360,720,1440,2880,5760,10080)),
     due_at TEXT NOT NULL,
     not_before TEXT NOT NULL,
     claim_version INTEGER NOT NULL DEFAULT 0 CHECK(claim_version >= 0),
@@ -121,8 +121,8 @@ CREATE TABLE metric_jobs (
     claimed_at TEXT,
     lease_until TEXT,
     completed_at TEXT,
-    reason TEXT NOT NULL DEFAULT '' CHECK(reason IN ('','metrics_unavailable','source_unavailable','read_failed','binding_mismatch','auth_required','cancelled','persistence_failed','measurement_failed','media_gone')),
-    PRIMARY KEY(agent_id,action_id,window_hours),
+    reason TEXT NOT NULL DEFAULT '' CHECK(reason IN ('','metrics_unavailable','source_unavailable','read_failed','binding_mismatch','auth_required','cancelled','persistence_failed','measurement_failed','media_gone','settled')),
+    PRIMARY KEY(agent_id,action_id,window_minutes),
     CHECK((claimed_at IS NULL) = (lease_until IS NULL)),
     CHECK(lease_until IS NULL OR lease_until > claimed_at),
     CHECK(completed_at IS NULL OR lease_until IS NULL)

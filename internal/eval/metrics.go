@@ -26,7 +26,7 @@ func runMetricsCase(ctx context.Context, c Case, p Profile, repeat int, opts Opt
 	logger, logs := run.Logger, &run.Logs
 	if c.Scenario == "logical_soak" {
 		e, err := RunMetricSimulation(ctx, run.Path("metrics.db"), 72, logger)
-		if err != nil || e.Samples != 19 || e.CompletedTargets != 21 || e.Restarts != 1 || e.SourceReads != 20 {
+		if err != nil || e.Samples != 32 || e.CompletedTargets != 63 || e.Restarts != 1 || e.SourceReads != 31 {
 			return fail("metric_simulation_failed")
 		}
 		r.LogicalHours = e.LogicalHours
@@ -67,19 +67,20 @@ func runMetricsCase(ctx context.Context, c Case, p Profile, repeat int, opts Opt
 	if err != nil {
 		return r
 	}
-	now = start.Add(time.Hour)
+	now = start.Add(time.Duration(store.MetricWindowMinutes[0]) * time.Minute)
 	expectedSamples, expectedTargets := 1, 1
 	switch c.Scenario {
 	case "windows":
-		for _, h := range store.MetricWindows {
-			now = start.Add(time.Duration(h) * time.Hour)
+		for _, m := range store.MetricWindowMinutes {
+			now = start.Add(time.Duration(m) * time.Minute)
+			source.Actions[mediaOf(ownURL)] = threads.Metrics{Views: 42 + int64(m), Likes: 3, Replies: 2, Reposts: 1}
 			got, e := proc.RunDue(ctx)
 			if e != nil || got.Samples != 1 || got.ClaimedJobs != 1 {
 				return fail("metric_window_failed")
 			}
 		}
-		expectedSamples, expectedTargets = 3, 3
-		r.LogicalHours = 24
+		expectedSamples, expectedTargets = len(store.MetricWindowMinutes), len(store.MetricWindowMinutes)
+		r.LogicalHours = 168
 	case "catchup_restart":
 		if _, _, err = proc.NextDue(ctx); err != nil {
 			return r
@@ -92,17 +93,17 @@ func runMetricsCase(ctx context.Context, c Case, p Profile, repeat int, opts Opt
 		if err != nil {
 			return r
 		}
-		now = start.Add(25 * time.Hour)
+		now = start.Add(168 * time.Hour)
 		got, e := proc.RunDue(ctx)
-		if e != nil || got.Samples != 1 || got.ClaimedJobs != 3 {
+		if e != nil || got.Samples != 1 || got.ClaimedJobs != len(store.MetricWindowMinutes) {
 			return fail("metric_catchup_failed")
 		}
 		samples, e := st.RecentMetricSamples(ctx, tmpl.ID, 10)
 		if e != nil || len(samples) != 1 || !samples[0].MeasuredAt.Equal(now) {
 			return fail("metric_catchup_fabricated_time")
 		}
-		expectedTargets = 3
-		r.LogicalHours = 25
+		expectedTargets = len(store.MetricWindowMinutes)
+		r.LogicalHours = 168
 	case "isolation":
 		const second = "https://fixture.invalid/own/two"
 		if !insert(5, tmpl.ID, false, second, start) {
@@ -118,7 +119,7 @@ func runMetricsCase(ctx context.Context, c Case, p Profile, repeat int, opts Opt
 	case "cancelled":
 		cancelled, cancel := context.WithCancel(ctx)
 		defer cancel()
-		source.Errors[threads.OpReadOwnMetrics] = context.Canceled
+		source.Errors[threads.OpReadActionMetrics] = context.Canceled
 		source.Hook = func(context.Context, threads.Call) error { cancel(); return nil }
 		got, e := proc.RunDue(cancelled)
 		if !errors.Is(e, context.Canceled) || got.Samples != 0 || got.DeferredJobs != 1 || source.Count(threads.OpClose) != 1 {
@@ -128,7 +129,7 @@ func runMetricsCase(ctx context.Context, c Case, p Profile, repeat int, opts Opt
 		r.EndReason = "cancelled"
 		r.LogicalHours = 1
 	case "missing":
-		source.Errors[threads.OpReadOwnMetrics] = errors.Join(threads.ErrMetricsUnavailable, errors.New("PRIVATE METRIC FAILURE"))
+		source.Errors[threads.OpReadActionMetrics] = errors.Join(threads.ErrMetricsUnavailable, errors.New("PRIVATE METRIC FAILURE"))
 		got, e := proc.RunDue(ctx)
 		if e != nil || got.Samples != 0 || got.DeferredJobs != 1 {
 			return fail("metric_missing_fabricated")

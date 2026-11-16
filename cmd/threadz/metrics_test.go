@@ -24,7 +24,7 @@ func TestMetricsCLIProducesOfflineLogicalEvidenceWithoutEnvironment(t *testing.T
 		t.Fatal(err)
 	}
 	var evidence eval.MetricSimulationEvidence
-	if err = json.Unmarshal(data, &evidence); err != nil || evidence.Samples != 19 || !evidence.Synthetic || evidence.TimingKind != "logical_time" {
+	if err = json.Unmarshal(data, &evidence); err != nil || evidence.Samples != 32 || !evidence.Synthetic || evidence.TimingKind != "logical_time" {
 		t.Fatalf("%+v err=%v", evidence, err)
 	}
 	for _, name := range []string{"events.jsonl", "eval.json"} {
